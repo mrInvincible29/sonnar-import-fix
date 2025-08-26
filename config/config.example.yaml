@@ -1,0 +1,104 @@
+# Sonarr Import Monitor Configuration Example
+# Copy this file to config.yaml and update with your settings
+
+# Sonarr server configuration
+sonarr:
+  # Sonarr server URL (required)
+  # Override with environment variable: SONARR_URL
+  url: "http://your-sonarr-server:8989"
+  
+  # Sonarr API key (required)
+  # Get this from Sonarr Settings > General > Security > API Key
+  # Override with environment variable: SONARR_API_KEY
+  api_key: "your-32-character-api-key-here"
+  
+  # Request timeout in seconds (optional)
+  timeout: 30
+
+# Monitoring behavior
+monitoring:
+  # How often to check the queue (seconds)
+  # Override with environment variable: MONITORING_INTERVAL
+  interval: 60
+  
+  # How long an item should be stuck before we consider action (seconds)
+  stuck_threshold: 300
+  
+  # Score tolerance - ignore small differences (not currently used)
+  score_tolerance: 50
+  
+  # Check for repeated grab patterns (multiple grabs, missing imports)
+  detect_repeated_grabs: true
+
+# Webhook server configuration
+webhook:
+  # Enable webhook server for real-time Sonarr events
+  # Override with environment variable: WEBHOOK_ENABLED
+  enabled: true
+  
+  # Webhook server settings
+  # Override with environment variable: WEBHOOK_HOST
+  host: "0.0.0.0"
+  
+  # Override with environment variable: WEBHOOK_PORT
+  port: 8090
+  
+  # Webhook authentication secret (strongly recommended)
+  # If not set, one will be auto-generated
+  # Override with environment variable: WEBHOOK_SECRET
+  secret: "generate-a-secure-random-32-character-secret"
+  
+  # How long to wait before checking if grab was imported (seconds)
+  # Override with environment variable: WEBHOOK_IMPORT_CHECK_DELAY
+  import_check_delay: 600
+
+# Tracker classification for decision making
+trackers:
+  # Private trackers - protect ratio by not removing downloads
+  private:
+    - beyondhd
+    - bhd
+    - privatehd
+    - passthepopcorn
+    - ptp
+    - broadcasthenet
+    - btn
+    - redacted
+    - orpheus
+    - blutopia
+  
+  # Public trackers - safe to remove failed downloads
+  public:
+    - nyaa
+    - animetosho
+    - rarbg
+    - 1337x
+    - thepiratebay
+    - yts
+    - eztv
+    - torrentgalaxy
+
+# Decision making thresholds
+decisions:
+  # Minimum score difference to force an import
+  # If grab_score - current_score >= this value, force import
+  # Override with environment variable: FORCE_IMPORT_THRESHOLD
+  force_import_threshold: 10
+  
+  # Automatically remove failed imports from public trackers
+  # Override with environment variable: REMOVE_PUBLIC_FAILURES
+  remove_public_failures: true
+  
+  # Protect private tracker ratio by not removing downloads
+  # Override with environment variable: PROTECT_PRIVATE_RATIO
+  protect_private_ratio: true
+
+# Logging configuration
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  # Override with environment variable: LOG_LEVEL
+  level: INFO
+  
+  # Log format: text (human readable) or json (structured)
+  # Override with environment variable: LOG_FORMAT
+  format: text
