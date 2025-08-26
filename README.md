@@ -1,11 +1,10 @@
 # Sonarr Import Monitor
 
-[![Test](https://github.com/yourusername/sonarr-import-monitor/workflows/Test/badge.svg)](https://github.com/yourusername/sonarr-import-monitor/actions)
-[![Docker](https://github.com/yourusername/sonarr-import-monitor/workflows/Docker/badge.svg)](https://github.com/yourusername/sonarr-import-monitor/actions)
-[![codecov](https://codecov.io/gh/yourusername/sonarr-import-monitor/branch/main/graph/badge.svg)](https://codecov.io/gh/yourusername/sonarr-import-monitor)
-[![Release](https://img.shields.io/github/v/release/yourusername/sonarr-import-monitor)](https://github.com/yourusername/sonarr-import-monitor/releases)
-[![Docker Pulls](https://img.shields.io/docker/pulls/yourusername/sonarr-import-monitor)](https://hub.docker.com/r/yourusername/sonarr-import-monitor)
-[![License](https://img.shields.io/github/license/yourusername/sonarr-import-monitor)](https://github.com/yourusername/sonarr-import-monitor/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![Docker](https://img.shields.io/badge/docker-supported-blue.svg)](https://hub.docker.com/)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
 An automated, production-ready solution to fix the infamous Sonarr import scoring issue where releases are grabbed with higher scores (using complete metadata) but fail to import due to lower scores (using filename only).
 
@@ -67,38 +66,151 @@ This script automatically:
 
 ## 🚀 Quick Start (v2.0)
 
-### Docker (Recommended)
+### 🐳 Docker Setup (Recommended)
 
-**1. One-line setup:**
+#### Prerequisites
+- Docker and Docker Compose installed
+- Your Sonarr instance accessible from the container
+- Sonarr API key (found in Settings → General)
+
+#### Option 1: Simple Docker Run
 ```bash
+# Replace with your actual Sonarr URL and API key
 docker run -d \
   --name sonarr-import-monitor \
-  -e SONARR_URL=http://your-sonarr:8989 \
-  -e SONARR_API_KEY=your-32-character-api-key \
+  --restart unless-stopped \
+  -e SONARR_URL="http://your-sonarr-host:8989" \
+  -e SONARR_API_KEY="your-actual-32-character-api-key" \
+  -e WEBHOOK_SECRET="$(openssl rand -hex 32)" \
   -p 8090:8090 \
-  ghcr.io/yourusername/sonarr-import-monitor:latest
+  ghcr.io/mrInvincible29/sonarr-import-monitor:latest
 ```
 
-**2. Docker Compose (recommended for production):**
+#### Option 2: Docker Compose (Production)
+
+**Step 1: Download the compose files**
 ```bash
-# Download compose file
-curl -o docker-compose.yml https://raw.githubusercontent.com/yourusername/sonarr-import-monitor/main/docker/docker-compose.simple.yml
+# Create project directory
+mkdir sonarr-import-monitor && cd sonarr-import-monitor
 
-# Create environment file
-echo "SONARR_URL=http://your-sonarr:8989" > .env
-echo "SONARR_API_KEY=your-32-character-api-key" >> .env
+# Download Docker Compose file
+wget -O docker-compose.yml https://raw.githubusercontent.com/mrInvincible29/sonarr-import-monitor/main/docker/docker-compose.yml
 
-# Start service
-docker-compose up -d
+# Download environment template
+wget -O .env https://raw.githubusercontent.com/mrInvincible29/sonarr-import-monitor/main/.env.example
 ```
 
-**3. Configure Sonarr Webhook:**
-- Go to Settings → Connect → Add → Webhook
-- URL: `http://your-server:8090/webhook/sonarr`  
-- Headers: `X-Webhook-Secret: your-generated-secret`
-- Enable: On Grab, On Import, On Import Failure
+**Step 2: Configure your environment**
+```bash
+# Edit the .env file with your settings
+nano .env
+```
 
-### Python (Development)
+Set these required values in `.env`:
+```bash
+# Your Sonarr instance details
+SONARR_URL=http://your-sonarr-host:8989
+SONARR_API_KEY=your-actual-32-character-api-key
+
+# Generate a secure webhook secret
+WEBHOOK_SECRET=your-generated-secret-from-openssl-rand
+
+# Optional: Customize behavior
+FORCE_IMPORT_THRESHOLD=10
+CHECK_INTERVAL=60
+LOG_LEVEL=INFO
+```
+
+**Step 3: Start the service**
+```bash
+# Start in background
+docker-compose up -d
+
+# Check logs
+docker-compose logs -f sonarr-import-monitor
+
+# Verify health
+curl http://localhost:8090/health
+```
+
+#### Troubleshooting Docker Setup
+
+| Issue | Solution |
+|-------|----------|
+| **Connection refused** | Ensure `SONARR_URL` is accessible from container. Use host IP, not `localhost` |
+| **401 Unauthorized** | Double-check your `SONARR_API_KEY` in Sonarr Settings → General |
+| **Container won't start** | Check logs with `docker-compose logs sonarr-import-monitor` |
+| **Webhook not working** | Verify `WEBHOOK_SECRET` matches what you configure in Sonarr |
+
+#### Docker Network Configuration
+
+If Sonarr is also running in Docker, ensure they can communicate:
+
+```bash
+# If using same Docker network
+SONARR_URL=http://sonarr:8989  # Use container name
+
+# If using Docker on same host
+SONARR_URL=http://host.docker.internal:8989  # On Mac/Windows
+SONARR_URL=http://172.17.0.1:8989           # On Linux
+
+# If Sonarr is on different host
+SONARR_URL=http://192.168.1.100:8989        # Use actual IP
+```
+
+#### 🔗 Configure Sonarr Webhook
+
+**Step 1: Access Sonarr Settings**
+- Go to Sonarr → Settings → Connect → Add Notification → Webhook
+
+**Step 2: Configure the webhook**
+```
+Name: Sonarr Import Monitor
+URL: http://your-docker-host:8090/webhook/sonarr
+Method: POST
+Username: (leave blank)
+Password: (leave blank)
+```
+
+**Step 3: Add authentication header**
+In the "Headers" section, click "Add Header":
+```
+Name: X-Webhook-Secret
+Value: your-webhook-secret-from-env-file
+```
+
+**Step 4: Enable events**
+Check these notification triggers:
+- ✅ On Grab
+- ✅ On Import  
+- ✅ On Import Failure
+- ✅ On Health Issue
+
+**Step 5: Test and save**
+- Click "Test" - you should see success in both Sonarr and the container logs
+- Click "Save" to activate
+
+#### Verification
+
+```bash
+# Check container is healthy
+docker-compose ps
+
+# View logs
+docker-compose logs -f
+
+# Test webhook endpoint
+curl -H "X-Webhook-Secret: your-secret" \
+     -X POST \
+     -H "Content-Type: application/json" \
+     -d '{"eventType":"Test"}' \
+     http://localhost:8090/webhook/sonarr
+
+# Check metrics
+curl http://localhost:8090/metrics
+```
+
+### 🐍 Python (Development/Manual Setup)
 
 **1. Test a specific episode:**
 ```bash
@@ -347,6 +459,21 @@ We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.
 - Code style and standards
 - Submitting pull requests
 
+### Quick Start for Contributors
+```bash
+# Fork and clone the repository
+git clone https://github.com/yourusername/sonarr-import-monitor.git
+cd sonarr-import-monitor
+
+# Set up development environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+pip install -r requirements.txt -r requirements-dev.txt
+
+# Run tests
+pytest
+```
+
 ## 📝 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
@@ -357,4 +484,4 @@ Thanks to the Sonarr community for identifying the scoring issue and providing f
 
 ---
 
-**⭐ Star this repo if it helped you!** | **🐛 [Report issues](https://github.com/yourusername/sonarr-import-monitor/issues)** | **💬 [Discussions](https://github.com/yourusername/sonarr-import-monitor/discussions)**
+**⭐ Star this repo if it helped you!** | **🐛 [Report issues](https://github.com/mrInvincible29/sonarr-import-monitor/issues)** | **💬 [Join Discussions](https://github.com/mrInvincible29/sonarr-import-monitor/discussions)** | **🤝 [Contributing](CONTRIBUTING.md)**
