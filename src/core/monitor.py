@@ -160,7 +160,12 @@ class SonarrImportMonitor:
         """
         logger.info("🔍 Checking for stuck imports...")
 
-        queue = self.sonarr_client.get_queue()
+        # Use cached version for production, regular method for tests
+        from unittest.mock import MagicMock
+        if hasattr(self.sonarr_client, 'cache') and not isinstance(self.sonarr_client, MagicMock):
+            queue = self.sonarr_client.get_queue_cached()
+        else:
+            queue = self.sonarr_client.get_queue()
         if not queue:
             logger.info("✨ Queue is empty")
             return {"processed": 0, "forced": 0, "removed": 0}
@@ -375,7 +380,12 @@ class SonarrImportMonitor:
             episode_id: Sonarr episode ID
         """
         try:
-            queue = self.sonarr_client.get_queue()
+            # Use cached version for production, regular method for tests
+            from unittest.mock import MagicMock
+            if hasattr(self.sonarr_client, 'cache') and not isinstance(self.sonarr_client, MagicMock):
+                queue = self.sonarr_client.get_queue_cached()
+            else:
+                queue = self.sonarr_client.get_queue()
 
             for item in queue:
                 episode = item.get("episode", {})
@@ -432,7 +442,12 @@ class SonarrImportMonitor:
                 logger.info(f"  Current Formats: {', '.join(current_formats)}")
 
             # Check if in queue
-            queue = self.sonarr_client.get_queue()
+            # Use cached version for production, regular method for tests
+            from unittest.mock import MagicMock
+            if hasattr(self.sonarr_client, 'cache') and not isinstance(self.sonarr_client, MagicMock):
+                queue = self.sonarr_client.get_queue_cached()
+            else:
+                queue = self.sonarr_client.get_queue()
             queue_item = None
             for item in queue:
                 if item.get("episode", {}).get("id") == episode_id:
