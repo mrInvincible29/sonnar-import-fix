@@ -1,0 +1,61 @@
+# Sonarr Import Monitor Configuration
+
+sonarr:
+  url: "http://REDACTED_URL"
+  api_key: "REDACTED_API_KEY"
+
+monitoring:
+  # How often to check the queue (seconds)
+  interval: 60
+  
+  # How long an item should be stuck before we consider action (seconds)
+  stuck_threshold: 300
+  
+  # Score tolerance - ignore small differences
+  score_tolerance: 50
+  
+  # Check for repeated grab patterns (multiple grabs, missing imports)
+  detect_repeated_grabs: true
+
+webhook:
+  # Enable webhook server for real-time Sonarr events
+  enabled: true
+  
+  # Webhook server settings
+  host: "0.0.0.0"
+  port: 8090
+  
+  # How long to wait before checking if grab was imported (seconds)
+  import_check_delay: 600
+
+trackers:
+  # Private trackers - protect ratio by not removing downloads
+  private:
+    - beyondhd
+    - bhd
+    - privatehd
+    - passthepopcorn
+    - ptp
+    - broadcasthenet
+    - btn
+  
+  # Public trackers - safe to remove failed downloads
+  public:
+    - nyaa
+    - animetosho
+    - rarbg
+    - 1337x
+    - thepiratebay
+    - yts
+    - eztv
+
+decisions:
+  # Minimum score difference to force an import
+  # If grab_score - current_score >= this value, force import
+  force_import_threshold: 10
+  
+  # Automatically remove failed imports from public trackers
+  remove_public_failures: true
+  
+  # Protect private tracker ratio by not removing downloads
+  protect_private_ratio: true
