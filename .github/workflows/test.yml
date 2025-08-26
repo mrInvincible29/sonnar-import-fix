@@ -25,6 +25,7 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
+        pip install -r requirements-dev.txt
 
     - name: Test configuration loading
       run: |
@@ -62,6 +63,23 @@ jobs:
         print('✅ All modules import successfully')
         "
 
+    - name: Run pytest tests
+      run: |
+        pytest tests/ -v --cov=src --cov-report=xml --cov-report=term-missing --cov-fail-under=76 --tb=short
+      env:
+        SONARR_URL: http://test-sonarr:8989
+        SONARR_API_KEY: test-key-for-github-actions-123456789
+        WEBHOOK_SECRET: test-webhook-secret-for-actions
+
+    - name: Upload coverage reports to Codecov
+      uses: codecov/codecov-action@v4
+      if: matrix.python-version == '3.11'
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+        fail_ci_if_error: false
+
     - name: Test configuration validation
       run: |
         # Test missing required config
@@ -85,7 +103,8 @@ jobs:
     - name: Install linting tools
       run: |
         python -m pip install --upgrade pip
-        pip install flake8 black isort mypy
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt
     
     - name: Lint with flake8
       run: |
