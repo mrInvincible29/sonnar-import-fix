@@ -1,0 +1,52 @@
+version: '3.8'
+
+# Development overrides for docker-compose.yml
+# Usage: docker-compose -f docker/docker-compose.yml -f docker/docker-compose.dev.yml up
+
+services:
+  sonarr-import-monitor:
+    # Remove read-only restriction for development
+    read_only: false
+    
+    # Enable debug logging
+    environment:
+      - LOG_LEVEL=DEBUG
+      - LOG_FORMAT=text  # Human-readable logs for development
+      - DRY_RUN=true     # Safe mode for development
+    
+    # Mount source code for live development
+    volumes:
+      # Mount source code (overrides COPY in Dockerfile)
+      - ../src:/app/src:ro
+      - ../main.py:/app/main.py:ro
+      
+      # Mount configuration examples
+      - ../config/config.example.yaml:/app/config/config.yaml:ro
+      
+      # Development logs
+      - ./dev-logs:/app/logs
+      
+      # Temp directory
+      - /tmp
+    
+    # Development command - enable auto-reload and verbose output
+    command: ["--webhook", "--verbose", "--dry-run"]
+    
+    # Development ports (avoid conflicts)
+    ports:
+      - "8091:8090"  # Use different port for development
+    
+    # Relaxed resource limits for development
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+
+# Development-specific network settings
+networks:
+  default:
+    name: sonarr-import-monitor-dev

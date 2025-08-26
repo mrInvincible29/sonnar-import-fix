@@ -1,0 +1,68 @@
+# Sonarr Import Monitor - Simple Docker Compose
+# ==============================================
+# This is the simplified version for easy setup.
+# For production deployments with advanced security, use docker-compose.yml
+
+services:
+  sonarr-import-monitor:
+    # Use pre-built image (replace with your registry if building custom)
+    image: sonarr-import-monitor:latest
+    container_name: sonarr-import-monitor
+    
+    # Load environment variables from .env file
+    env_file:
+      - .env
+    
+    # Required configuration
+    environment:
+      # Sonarr connection (REQUIRED)
+      - SONARR_URL=${SONARR_URL}
+      - SONARR_API_KEY=${SONARR_API_KEY}
+      
+      # Webhook settings (optional)
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}  # Auto-generated if not set
+      
+      # Basic settings with good defaults
+      - LOG_LEVEL=INFO
+      - MONITORING_INTERVAL=60
+      - FORCE_IMPORT_THRESHOLD=10
+    
+    # Make webhook accessible
+    ports:
+      - "8090:8090"
+    
+    # Save logs to local directory
+    volumes:
+      - ./logs:/app/logs
+    
+    # Restart if it crashes
+    restart: unless-stopped
+    
+    # Health check to monitor status
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+# ==============================================
+# Quick Start Instructions:
+# 
+# 1. Copy the environment file:
+#    cp docker/.env.example .env
+# 
+# 2. Edit .env with your Sonarr details:
+#    SONARR_URL=http://your-sonarr:8989
+#    SONARR_API_KEY=your-api-key
+# 
+# 3. Start the service:
+#    docker-compose -f docker/docker-compose.simple.yml up -d
+#
+# 4. Configure Sonarr webhook:
+#    URL: http://your-server:8090/webhook/sonarr
+#    Method: POST
+#    Header: X-Webhook-Secret = <secret-from-logs>
+#
+# 5. Check logs:
+#    docker-compose -f docker/docker-compose.simple.yml logs -f
+# ==============================================

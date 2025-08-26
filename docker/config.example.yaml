@@ -1,0 +1,189 @@
+# Sonarr Import Monitor Configuration Example
+# Copy this file to config.yaml and uncomment the volume mount in docker-compose.yml
+#
+# NOTE: Environment variables take precedence over configuration file settings
+# For Docker deployments, it's recommended to use environment variables instead
+
+# =============================================================================
+# Sonarr Connection Settings
+# =============================================================================
+sonarr:
+  # Your Sonarr server URL (REQUIRED)
+  # Environment variable: SONARR_URL
+  url: "http://sonarr:8989"
+  
+  # Your Sonarr API key (REQUIRED)
+  # Get this from Sonarr Settings > General > Security > API Key
+  # Environment variable: SONARR_API_KEY
+  api_key: "your-32-character-sonarr-api-key-here"
+
+# =============================================================================
+# Webhook Server Settings
+# =============================================================================
+webhook:
+  # Enable webhook server for real-time Sonarr events
+  # Environment variable: WEBHOOK_ENABLED
+  enabled: true
+  
+  # Webhook server host (0.0.0.0 for all interfaces in Docker)
+  # Environment variable: WEBHOOK_HOST
+  host: "0.0.0.0"
+  
+  # Webhook server port
+  # Environment variable: WEBHOOK_PORT
+  port: 8090
+  
+  # Webhook authentication secret (auto-generated if not specified)
+  # Generate with: openssl rand -hex 32
+  # Environment variable: WEBHOOK_SECRET
+  secret: "your-64-character-webhook-secret-here"
+  
+  # Delay before checking imports after webhook event (seconds)
+  # Environment variable: WEBHOOK_IMPORT_CHECK_DELAY
+  import_check_delay: 600
+
+# =============================================================================
+# Monitoring Behavior Settings
+# =============================================================================
+decisions:
+  # Score difference threshold for forcing imports
+  # If grab score - import score >= threshold, force import
+  # Set to null to disable forced imports
+  # Environment variable: FORCE_IMPORT_THRESHOLD
+  force_import_threshold: 10
+  
+  # Remove failed downloads from public trackers
+  # Environment variable: REMOVE_PUBLIC_FAILURES
+  remove_public_failures: true
+  
+  # Protect downloads from private trackers (don't remove failed downloads)
+  # Environment variable: PROTECT_PRIVATE_RATIO
+  protect_private_ratio: true
+  
+  # Additional protection settings
+  protection:
+    # Minimum seed ratio to maintain for private trackers
+    min_seed_ratio: 1.0
+    
+    # Minimum seed time (hours) to maintain
+    min_seed_time: 24
+
+# =============================================================================
+# Monitoring Intervals
+# =============================================================================
+monitoring:
+  # Queue check interval in seconds
+  # Environment variable: MONITORING_INTERVAL
+  interval: 60
+  
+  # Maximum time to wait for imports before taking action (minutes)
+  max_import_wait: 30
+  
+  # How often to check for repeated grab patterns (minutes)
+  repeated_grab_check_interval: 15
+
+# =============================================================================
+# Logging Configuration
+# =============================================================================
+logging:
+  # Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  # Environment variable: LOG_LEVEL
+  level: "INFO"
+  
+  # Log format: 'text' for human-readable, 'json' for structured logs
+  # Environment variable: LOG_FORMAT
+  format: "json"
+  
+  # Log file location (optional)
+  file: "/app/logs/sonarr-import-monitor.log"
+  
+  # Log rotation settings
+  rotation:
+    max_size: "10MB"
+    backup_count: 5
+
+# =============================================================================
+# Quality Profile Overrides (Advanced)
+# =============================================================================
+# Override decisions for specific quality profiles
+quality_profiles:
+  # Example: Be more aggressive for 4K profiles
+  "Ultra-HD":
+    force_import_threshold: 5
+    remove_public_failures: true
+    protect_private_ratio: true
+  
+  # Example: Be more conservative for standard profiles
+  "HD-1080p":
+    force_import_threshold: 15
+    remove_public_failures: false
+
+# =============================================================================
+# Series-Specific Overrides (Advanced)
+# =============================================================================
+# Override decisions for specific series
+series_overrides:
+  # Example: Different settings for specific shows
+  "My Favorite Show":
+    force_import_threshold: 5
+    remove_public_failures: false
+    
+  "Less Important Show":
+    force_import_threshold: 20
+
+# =============================================================================
+# Custom Format Scoring (Advanced)
+# =============================================================================
+# Adjust scoring for specific custom formats
+custom_format_adjustments:
+  # Example: Boost HDR content
+  "HDR": 10
+  "Dolby Vision": 15
+  
+  # Example: Penalize certain releases
+  "Low Quality Group": -20
+  "CAM": -50
+
+# =============================================================================
+# Notification Settings (Future Feature)
+# =============================================================================
+notifications:
+  enabled: false
+  
+  # Webhook notifications
+  webhook_url: ""
+  
+  # Discord notifications
+  discord:
+    enabled: false
+    webhook_url: ""
+  
+  # Email notifications  
+  email:
+    enabled: false
+    smtp_server: ""
+    smtp_port: 587
+    username: ""
+    password: ""
+    from_email: ""
+    to_email: ""
+
+# =============================================================================
+# Development/Debug Settings
+# =============================================================================
+debug:
+  # Enable dry run mode (no actual changes made)
+  # Environment variable: DRY_RUN
+  dry_run: false
+  
+  # Enable verbose API logging
+  log_api_calls: false
+  
+  # Save detailed decision logs
+  save_decision_logs: false
+  
+  # Test mode settings
+  test_episode:
+    series: ""
+    season: 1
+    episode: 1

@@ -1,0 +1,107 @@
+name: Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12']
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Test configuration loading
+      run: |
+        export SONARR_URL=http://test:8989
+        export SONARR_API_KEY=test123456789012345678901234567890
+        python -c "
+        import sys
+        sys.path.insert(0, 'src')
+        from src.config.loader import ConfigLoader
+        config = ConfigLoader()
+        print('✅ Configuration loaded successfully')
+        print('URL:', config.get('sonarr.url'))
+        print('Webhook secret generated:', bool(config.get('webhook.secret')))
+        "
+
+    - name: Test CLI help
+      run: |
+        python main.py --help
+
+    - name: Test module imports
+      run: |
+        python -c "
+        import sys
+        sys.path.insert(0, 'src')
+        
+        # Test all main imports
+        from src.config.loader import ConfigLoader
+        from src.api.sonarr_client import SonarrClient  
+        from src.core.analyzer import ScoreAnalyzer
+        from src.core.monitor import SonarrImportMonitor
+        from src.api.webhook_server import WebhookServer
+        from src.utils.logger import setup_logging
+        from src.utils.decorators import retry
+        
+        print('✅ All modules import successfully')
+        "
+
+    - name: Test configuration validation
+      run: |
+        # Test missing required config
+        python main.py --test-config 2>&1 | grep -q "SONARR_URL" || exit 1
+        
+        # Test with invalid API key
+        export SONARR_URL=http://test:8989
+        export SONARR_API_KEY=invalid
+        timeout 10s python main.py --test-config 2>/dev/null && exit 1 || echo "✅ Invalid config rejected as expected"
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install linting tools
+      run: |
+        python -m pip install --upgrade pip
+        pip install flake8 black isort mypy
+    
+    - name: Lint with flake8
+      run: |
+        # stop the build if there are Python syntax errors or undefined names
+        flake8 src/ main.py --count --select=E9,F63,F7,F82 --show-source --statistics
+        # exit-zero treats all errors as warnings
+        flake8 src/ main.py --count --exit-zero --max-complexity=10 --max-line-length=100 --statistics
+
+    - name: Check formatting with black
+      run: |
+        black --check --diff src/ main.py
+
+    - name: Check import sorting with isort
+      run: |
+        isort --check-only --diff src/ main.py
+
+    - name: Type check with mypy
+      run: |
+        mypy src/ --ignore-missing-imports --no-strict-optional

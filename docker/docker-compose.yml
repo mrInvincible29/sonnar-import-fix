@@ -1,0 +1,108 @@
+version: '3.8'
+
+services:
+  sonarr-import-monitor:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    image: sonarr-import-monitor:latest
+    container_name: sonarr-import-monitor
+    
+    # Security settings
+    user: "1000:1000"
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    
+    # Environment variables
+    environment:
+      # Required settings (must be set in .env file)
+      - SONARR_URL=${SONARR_URL:?Please set SONARR_URL}
+      - SONARR_API_KEY=${SONARR_API_KEY:?Please set SONARR_API_KEY}
+      
+      # Webhook settings
+      - WEBHOOK_ENABLED=${WEBHOOK_ENABLED:-true}
+      - WEBHOOK_HOST=${WEBHOOK_HOST:-0.0.0.0}
+      - WEBHOOK_PORT=${WEBHOOK_PORT:-8090}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}  # Auto-generated if not set
+      - WEBHOOK_IMPORT_CHECK_DELAY=${WEBHOOK_IMPORT_CHECK_DELAY:-600}
+      
+      # Monitoring settings
+      - MONITORING_INTERVAL=${MONITORING_INTERVAL:-60}
+      - FORCE_IMPORT_THRESHOLD=${FORCE_IMPORT_THRESHOLD:-10}
+      - REMOVE_PUBLIC_FAILURES=${REMOVE_PUBLIC_FAILURES:-true}
+      - PROTECT_PRIVATE_RATIO=${PROTECT_PRIVATE_RATIO:-true}
+      
+      # Logging settings
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FORMAT=${LOG_FORMAT:-json}
+      
+      # Python settings
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      
+      # Optional: Dry run mode
+      - DRY_RUN=${DRY_RUN:-false}
+    
+    # Port mapping
+    ports:
+      - "${WEBHOOK_PORT:-8090}:8090"
+    
+    # Volume mounts
+    volumes:
+      # Configuration file (optional - env vars take precedence)
+      # Uncomment the line below and create config.yaml if you want to use file-based config
+      # - ./config.yaml:/app/config/config.yaml:ro
+      
+      # Logs directory (with write access)
+      - ./logs:/app/logs
+      
+      # Temporary directory for container operations
+      - /tmp
+    
+    # Restart policy
+    restart: unless-stopped
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Labels for organization
+    labels:
+      - "com.docker.compose.project=sonarr-import-monitor"
+      - "maintainer=sonarr-import-monitor-team"
+      - "version=2.0.0"
+
+# Optional: Network for integration with other services
+networks:
+  default:
+    name: sonarr-import-monitor
+    driver: bridge
