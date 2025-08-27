@@ -58,11 +58,15 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix={{branch}}-
           labels: |
             org.opencontainers.image.title=Sonarr Import Monitor
-            org.opencontainers.image.description=Automatically fixes Sonarr import scoring issues
-            org.opencontainers.image.vendor=Sonarr Import Monitor Team
+            org.opencontainers.image.description=Automated tool to fix Sonarr import scoring discrepancies and stuck downloads
+            org.opencontainers.image.vendor=mrInvincible29
             org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.source=https://github.com/mrInvincible29/sonnar-import-fix
+            org.opencontainers.image.documentation=https://github.com/mrInvincible29/sonnar-import-fix#readme
+            org.opencontainers.image.authors=mrInvincible29
 
       # Build and push Docker image with Buildx (don't push on PR)
       - name: Build and push Docker image
@@ -122,12 +126,10 @@ jobs:
     if: github.event_name != 'pull_request'
     strategy:
       matrix:
-        platform: [ubuntu-latest, self-hosted-arm64]
+        platform: [ubuntu-latest]
         include:
           - platform: ubuntu-latest
             arch: amd64
-          - platform: self-hosted-arm64
-            arch: arm64
     runs-on: ${{ matrix.platform }}
     
     steps:
