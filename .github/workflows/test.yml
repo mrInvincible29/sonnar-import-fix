@@ -82,10 +82,13 @@ jobs:
 
     - name: Test configuration validation
       run: |
-        # Test missing required config
-        python main.py --test-config 2>&1 | grep -q "SONARR_URL" || exit 1
+        # Test with default config (should fail to connect)
+        export SONARR_URL=http://test-unreachable:8989
+        export SONARR_API_KEY=test123456789012345678901234567890
+        python main.py --test-config 2>&1 | grep -q "Failed to connect" || exit 1
+        echo "✅ Unreachable host detected as expected"
         
-        # Test with invalid API key
+        # Test with invalid API key format (too short)
         export SONARR_URL=http://test:8989
         export SONARR_API_KEY=invalid
         timeout 10s python main.py --test-config 2>/dev/null && exit 1 || echo "✅ Invalid config rejected as expected"

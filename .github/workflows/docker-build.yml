@@ -155,8 +155,3 @@ jobs:
           # Cleanup
           docker stop test-container || true
           docker rm test-container || true
-
-outputs:
-  image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-  digest: ${{ steps.build-and-push.outputs.digest }}
-  version: ${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.version'] }}
