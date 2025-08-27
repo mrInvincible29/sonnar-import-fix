@@ -5,6 +5,30 @@ All notable changes to Sonarr Import Monitor will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] - 2025-08-27
+
+### 🔧 Fixed
+
+#### GitHub Actions & CI/CD
+- **GitHub Actions Artifact Upload**: Update from deprecated v3 to v4 (v3 will stop working January 30, 2025)
+- **SARIF Upload Permissions**: Handle CodeQL SARIF upload permission errors gracefully with fallback artifact upload
+- **Docker Workflows**: Comprehensive improvements to Docker build and publish workflows
+- **Connection Testing**: Better handling of expected connection failures in Docker configuration tests
+- **Repository Names**: Fix Docker workflow issues with lowercase repository name requirements
+- **Workflow Syntax**: Resolve GitHub Actions workflow syntax errors
+
+#### Repository & Documentation
+- **Documentation Updates**: General repository cleanup and documentation improvements
+
+### 🚀 Performance & Reliability
+- **Artifact Uploads**: Up to 10x performance improvements with GitHub Actions v4
+- **Workflow Reliability**: More robust CI/CD pipeline with better error handling
+- **Security Scanning**: Continued security scanning even when SARIF upload permissions fail
+
+### 📦 Deployment
+- **Docker Images**: No changes to Docker images, same multi-platform support
+- **Upgrade Path**: Drop-in replacement for v2.0.0, no configuration changes needed
+
 ## [2.0.0] - 2025-08-27
 
 ### 🎉 Major Release - Complete Architecture Overhaul
@@ -126,7 +150,7 @@ This release represents a complete rewrite and modernization of Sonarr Import Mo
 #### Docker Images
 ```bash
 # Multi-platform support
-docker pull ghcr.io/yourusername/sonarr-import-monitor:2.0.0
+docker pull ghcr.io/mrInvincible29/sonarr-import-monitor:2.0.0
 
 # ARM64 (Apple M1/M2, Raspberry Pi)
 docker pull --platform linux/arm64 sonarr-import-monitor:2.0.0
@@ -146,7 +170,7 @@ docker run -d \
   sonarr-import-monitor:2.0.0
 
 # Docker Compose
-curl -o docker-compose.yml https://raw.githubusercontent.com/yourusername/sonarr-import-monitor/v2.0.0/docker/docker-compose.simple.yml
+curl -o docker-compose.yml https://raw.githubusercontent.com/mrInvincible29/sonarr-import-monitor/v2.0.0/docker/docker-compose.simple.yml
 docker-compose up -d
 ```
 
