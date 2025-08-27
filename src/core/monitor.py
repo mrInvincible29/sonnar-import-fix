@@ -162,7 +162,10 @@ class SonarrImportMonitor:
 
         # Use cached version for production, regular method for tests
         from unittest.mock import MagicMock
-        if hasattr(self.sonarr_client, 'cache') and not isinstance(self.sonarr_client, MagicMock):
+
+        if hasattr(self.sonarr_client, "cache") and not isinstance(
+            self.sonarr_client, MagicMock
+        ):
             queue = self.sonarr_client.get_queue_cached()
         else:
             queue = self.sonarr_client.get_queue()
@@ -382,7 +385,10 @@ class SonarrImportMonitor:
         try:
             # Use cached version for production, regular method for tests
             from unittest.mock import MagicMock
-            if hasattr(self.sonarr_client, 'cache') and not isinstance(self.sonarr_client, MagicMock):
+
+            if hasattr(self.sonarr_client, "cache") and not isinstance(
+                self.sonarr_client, MagicMock
+            ):
                 queue = self.sonarr_client.get_queue_cached()
             else:
                 queue = self.sonarr_client.get_queue()
@@ -444,7 +450,10 @@ class SonarrImportMonitor:
             # Check if in queue
             # Use cached version for production, regular method for tests
             from unittest.mock import MagicMock
-            if hasattr(self.sonarr_client, 'cache') and not isinstance(self.sonarr_client, MagicMock):
+
+            if hasattr(self.sonarr_client, "cache") and not isinstance(
+                self.sonarr_client, MagicMock
+            ):
                 queue = self.sonarr_client.get_queue_cached()
             else:
                 queue = self.sonarr_client.get_queue()

@@ -38,49 +38,46 @@ class SonarrClient:
         self.timeout = config.get("sonarr.timeout", 30)
 
         self.headers = {"X-Api-Key": self.api_key, "Content-Type": "application/json"}
-        
+
         # Create persistent session for connection pooling
         self.session = requests.Session()
         self.session.headers.update(self.headers)
-        
+
         # Configure session for better performance
         adapter = requests.adapters.HTTPAdapter(
             pool_connections=10,
             pool_maxsize=20,
-            max_retries=0  # We handle retries manually
+            max_retries=0,  # We handle retries manually
         )
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
 
         # TTL cache for API responses
         self.cache = TTLCache(default_ttl=300)  # 5 minutes default
-        
+
         # Cache for configuration data that rarely changes
         self._custom_formats_cache: Optional[Dict[int, Dict]] = None
         self._quality_profiles_cache: Optional[Dict[int, Dict]] = None
         self._series_profile_map_cache: Optional[Dict[int, int]] = None
 
         logger.info(f"Initialized Sonarr client for: {self.base_url}")
-        
+
     def close(self):
         """Close the session and cleanup resources."""
-        if hasattr(self, 'session'):
+        if hasattr(self, "session"):
             self.session.close()
-    
+
     def __enter__(self):
         """Context manager entry."""
         return self
-        
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit with cleanup."""
         self.close()
-        
+
     def get_cache_stats(self) -> Dict:
         """Get cache statistics for monitoring."""
-        return {
-            'cache_stats': self.cache.stats(),
-            'cache_size': self.cache.size()
-        }
+        return {"cache_stats": self.cache.stats(), "cache_size": self.cache.size()}
 
     def _make_request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
         """
@@ -257,24 +254,24 @@ class SonarrClient:
                 scores[format_id] = score
 
         return scores
-    
+
     def get_custom_format_scores_cached(self, series_id: int) -> Dict[int, int]:
         """
         Get custom format scores for a series with caching (5 minute TTL).
-        
+
         Args:
             series_id: Sonarr series ID
-            
+
         Returns:
             Dictionary mapping custom format ID to score
         """
         cache_key = f"custom_format_scores_{series_id}"
         cached_result = self.cache.get(cache_key)
-        
+
         if cached_result is not None:
             logger.debug(f"Using cached custom format scores for series {series_id}")
             return cached_result
-            
+
         result = self.get_custom_format_scores(series_id)
         self.cache.set(cache_key, result, ttl=300)  # 5 minute cache
         return result
@@ -305,24 +302,24 @@ class SonarrClient:
         except Exception as e:
             logger.error(f"Failed to get queue: {e}")
             return []
-    
+
     def get_queue_cached(self, include_unknown: bool = True) -> List[Dict]:
         """
         Get current download queue with caching (60 second TTL).
-        
+
         Args:
             include_unknown: Include unknown series items
-            
+
         Returns:
             List of queue items
         """
         cache_key = f"queue_{include_unknown}"
         cached_result = self.cache.get(cache_key)
-        
+
         if cached_result is not None:
             logger.debug("Using cached queue data")
             return cached_result
-            
+
         result = self.get_queue(include_unknown)
         self.cache.set(cache_key, result, ttl=60)  # 1 minute cache
         return result

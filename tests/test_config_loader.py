@@ -357,7 +357,8 @@ class TestNestedValueOperations:
         """Test setting nested value in existing path"""
         with patch('src.config.loader.load_dotenv'):
             with patch.object(Path, 'exists', return_value=False):
-                config = ConfigLoader()
+                with patch.dict(os.environ, {'SONARR_URL': 'http://test', 'SONARR_API_KEY': 'test123'}):
+                    config = ConfigLoader()
                 config.config = {
                     'existing': {
                         'nested': {

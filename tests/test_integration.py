@@ -498,7 +498,7 @@ class TestMultiComponentScenarios:
     """Test scenarios involving multiple components"""
     
     @pytest.fixture
-    def multi_component_system(self, mock_config):
+    def multi_component_system(self, mock_config, test_env_vars):
         """Create system with multiple components for complex testing"""
         with patch('src.config.loader.load_dotenv'), \
              patch('src.config.loader.Path.exists', return_value=False), \

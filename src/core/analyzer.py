@@ -70,10 +70,15 @@ class ScoreAnalyzer:
         if not custom_formats_list:
             return FormatAnalysis(0, [])
 
-        # Use cached version for production, regular method for tests  
+        # Use cached version for production, regular method for tests
         from unittest.mock import MagicMock
-        if hasattr(self.sonarr_client, 'cache') and not isinstance(self.sonarr_client, MagicMock):
-            format_scores = self.sonarr_client.get_custom_format_scores_cached(series_id)
+
+        if hasattr(self.sonarr_client, "cache") and not isinstance(
+            self.sonarr_client, MagicMock
+        ):
+            format_scores = self.sonarr_client.get_custom_format_scores_cached(
+                series_id
+            )
         else:
             format_scores = self.sonarr_client.get_custom_format_scores(series_id)
         total_score = 0
