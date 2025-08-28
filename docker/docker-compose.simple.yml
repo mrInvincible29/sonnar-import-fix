@@ -1,12 +1,12 @@
 # Sonarr Import Monitor - Simple Docker Compose
 # ==============================================
-# This is the simplified version for easy setup.
+# This is the simplified version for easy setup using the pre-built GHCR image.
 # For production deployments with advanced security, use docker-compose.yml
 
 services:
   sonarr-import-monitor:
-    # Use pre-built image (replace with your registry if building custom)
-    image: sonarr-import-monitor:latest
+    # Use pre-built image from GitHub Container Registry
+    image: ghcr.io/mrinvincible29/sonnar-import-fix:latest
     container_name: sonarr-import-monitor
     
     # Load environment variables from .env file

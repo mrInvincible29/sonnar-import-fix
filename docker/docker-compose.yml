@@ -2,13 +2,7 @@ version: '3.8'
 
 services:
   sonarr-import-monitor:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-      platforms:
-        - linux/amd64
-        - linux/arm64
-    image: sonarr-import-monitor:latest
+    image: ghcr.io/mrinvincible29/sonnar-import-fix:latest
     container_name: sonarr-import-monitor
     
     # Security settings

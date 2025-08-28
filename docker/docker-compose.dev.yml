@@ -2,6 +2,7 @@ version: '3.8'
 
 # Development overrides for docker-compose.yml
 # Usage: docker-compose -f docker/docker-compose.yml -f docker/docker-compose.dev.yml up
+# This inherits the GHCR image from docker-compose.yml
 
 services:
   sonarr-import-monitor:
