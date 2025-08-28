@@ -117,7 +117,7 @@ WEBHOOK_SECRET=your-generated-secret-from-openssl-rand
 
 # Optional: Customize behavior
 FORCE_IMPORT_THRESHOLD=10
-CHECK_INTERVAL=60
+MONITORING_INTERVAL=60
 LOG_LEVEL=INFO
 ```
 

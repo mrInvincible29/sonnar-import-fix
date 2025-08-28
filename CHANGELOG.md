@@ -5,6 +5,24 @@ All notable changes to Sonarr Import Monitor will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2025-08-28
+
+⚠️ **IMPORTANT**: Previous versions (v2.0.0 - v2.0.3) had a critical bug where force imports appeared to work but were not actually importing files. If you were using these versions, your stuck imports were likely not being resolved. Please upgrade to v2.1.0 immediately.
+
+### Fixed
+- **Critical**: Force imports were not actually working - manual imports were queued but never executed due to incorrect API usage. This bug was preventing the core functionality of the application from working properly.
+- **Fixed**: Force import method now correctly uses the Command API with "ManualImport" command
+- **Fixed**: Import mode set to "move" to properly override Sonarr's quality rejections
+
+### Added
+- **Queue Cleanup**: Automatic cleanup of stuck queue items after successful force imports
+- **Command Tracking**: Force import now returns command ID for better import tracking
+- **Post-Import Verification**: 8-second wait and cleanup check after force import
+
+### Changed
+- Force import method signature now returns tuple (success, command_id) instead of just boolean
+- Updated all tests to handle new return signature
+
 ## [2.0.3] - 2025-08-28
 
 ### Fixed

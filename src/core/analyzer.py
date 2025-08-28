@@ -401,7 +401,10 @@ class ScoreAnalyzer:
                 logger.info(f"   ⏸️ Action: Keep - {reasoning}")
                 return {"action": "keep", "reasoning": reasoning}
             elif is_public_tracker:
-                reasoning = f"Public tracker with lower score (grab: {grab_score}, current: {current_score}, diff: {score_diff})"
+                reasoning = (
+                    f"Public tracker with lower score "
+                    f"(grab: {grab_score}, current: {current_score}, diff: {score_diff})"
+                )
                 logger.info(f"   🗑️ Action: Remove - {reasoning}")
                 return {"action": "remove", "reasoning": reasoning}
             else:  # is_unknown_tracker

@@ -257,8 +257,16 @@ class SonarrImportMonitor:
                 else:
                     return "error"
 
-            elif decision.action in ["keep", "wait"]:
-                logger.info(f"   ⏸️ Keeping item: {decision.reasoning}")
+            elif decision.action == "keep":
+                success = self._execute_keep_action(queue_item)
+                if success:
+                    logger.info(f"   ⏸️ Kept in download client: {decision.reasoning}")
+                    return "kept"
+                else:
+                    return "error"
+
+            elif decision.action == "wait":
+                logger.info(f"   ⏳ Waiting: {decision.reasoning}")
                 return "kept"
 
             else:
@@ -276,21 +284,36 @@ class SonarrImportMonitor:
             logger.info("   🔸 DRY RUN: Would force import")
             return True
 
-        episode = queue_item.get("episode", {})
-        episode_id = episode.get("id")
         download_id = queue_item.get("downloadId")
         quality = queue_item.get("quality")
 
-        if not episode_id or not download_id:
-            logger.error("   Missing episode ID or download ID for force import")
+        if not download_id:
+            logger.error("   Missing download ID for force import")
             return False
 
-        success = self.sonarr_client.force_import(download_id, episode_id, quality)
+        success, command_id = self.sonarr_client.force_import(download_id, quality)
 
         if success:
-            logger.info(f"   ✅ Successfully forced import")
+            logger.info("   ✅ Successfully forced import")
+
+            # Wait for command to process and then cleanup any stuck queue items
+            if command_id:
+                logger.debug(
+                    f"   Waiting for import command {command_id} to process..."
+                )
+                time.sleep(8)  # Wait for Sonarr to process the import
+
+                # Attempt to clean up stuck queue items
+                logger.debug("   Checking for post-import queue cleanup...")
+                cleanup_success = self.sonarr_client.cleanup_post_import_queue_item(
+                    download_id
+                )
+                if cleanup_success:
+                    logger.info("   🧹 Cleaned up stuck queue item after import")
+                else:
+                    logger.debug("   No queue cleanup needed")
         else:
-            logger.error(f"   ❌ Failed to force import")
+            logger.error("   ❌ Failed to force import")
 
         return success
 
@@ -311,9 +334,36 @@ class SonarrImportMonitor:
         )
 
         if success:
-            logger.info(f"   ✅ Successfully removed from queue")
+            logger.info("   ✅ Successfully removed from queue")
         else:
-            logger.error(f"   ❌ Failed to remove from queue")
+            logger.error("   ❌ Failed to remove from queue")
+
+        return success
+
+    def _execute_keep_action(self, queue_item: Dict) -> bool:
+        """Execute keep action - remove from Sonarr queue but keep in download client."""
+        if self.dry_run:
+            logger.info(
+                "   🔸 DRY RUN: Would remove from Sonarr queue but keep in download client"
+            )
+            return True
+
+        queue_id = queue_item.get("id")
+        if not queue_id:
+            logger.error("   Missing queue ID for keep action")
+            return False
+
+        # Remove from Sonarr queue only, keep in download client (don't blocklist)
+        success = self.sonarr_client.remove_from_queue(
+            queue_id, remove_from_client=False, blocklist=False
+        )
+
+        if success:
+            logger.info(
+                "   ✅ Successfully removed from Sonarr queue, kept in download client"
+            )
+        else:
+            logger.error("   ❌ Failed to remove from Sonarr queue")
 
         return success
 

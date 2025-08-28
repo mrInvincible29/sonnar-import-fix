@@ -432,18 +432,17 @@ class SonarrClient:
 
     @retry(max_attempts=2, delay=2.0, exceptions=SonarrAPIError)
     def force_import(
-        self, download_id: str, episode_id: int, quality: Dict = None
-    ) -> bool:
+        self, download_id: str, quality: Dict = None
+    ) -> tuple[bool, Optional[int]]:
         """
         Force import of a download.
 
         Args:
             download_id: Download ID from queue
-            episode_id: Episode ID to import to
             quality: Quality information (optional)
 
         Returns:
-            True if successful, False otherwise
+            Tuple of (success: bool, command_id: Optional[int])
         """
         try:
             # Get manual import candidates
@@ -455,23 +454,49 @@ class SonarrClient:
                 logger.warning(
                     f"No manual import candidates found for download {download_id}"
                 )
-                return False
+                return False, None
 
             # Prepare import items
             for item in import_items:
-                item["episodeIds"] = [episode_id]
+                # Extract episode IDs from the episodes array
+                episodes = item.get("episodes", [])
+                episode_ids = [ep.get("id") for ep in episodes if ep.get("id")]
+
+                if episode_ids:
+                    item["episodeIds"] = episode_ids
+
+                # Use series ID from the existing series object
+                series = item.get("series", {})
+                series_id = series.get("id")
+                if series_id:
+                    item["seriesId"] = series_id
+
                 if quality:
                     item["quality"] = quality
 
-            # Execute import
-            response = self._make_request("PUT", "/manualimport", json=import_items)
+            # Execute import using command API
+            command_payload = {
+                "name": "ManualImport",
+                "files": import_items,
+                "importMode": "move",
+            }
 
-            logger.info(f"Force import successful for download {download_id}")
-            return True
+            response = self._make_request("POST", "/command", json=command_payload)
+
+            if response.status_code == 201:
+                command_data = response.json()
+                command_id = command_data.get("id")
+                logger.info(
+                    f"Force import command queued for download {download_id} (Command ID: {command_id})"
+                )
+                return True, command_id
+            else:
+                logger.warning(f"Force import command returned {response.status_code}")
+                return False, None
 
         except Exception as e:
             logger.error(f"Failed to force import {download_id}: {e}")
-            return False
+            return False, None
 
     @retry(max_attempts=2, delay=1.0, exceptions=SonarrAPIError)
     def remove_from_queue(
@@ -497,6 +522,81 @@ class SonarrClient:
 
         except Exception as e:
             logger.error(f"Failed to remove queue item {queue_id}: {e}")
+            return False
+
+    def should_cleanup_queue_item(self, queue_item: Dict) -> bool:
+        """
+        Check if a queue item should be cleaned up after force import.
+
+        This happens when using 'move' mode and the file was successfully moved,
+        but the queue item persists with "No files found" message.
+
+        Args:
+            queue_item: Queue item data
+
+        Returns:
+            True if the item should be removed from queue
+        """
+        # Check if the item has "No files found" message
+        status_messages = queue_item.get("statusMessages", [])
+        for msg in status_messages:
+            messages = msg.get("messages", [])
+            for message_text in messages:
+                if "No files found are eligible for import" in message_text:
+                    logger.debug(
+                        f"Queue item {queue_item.get('id')} has 'No files found' message"
+                    )
+                    return True
+        return False
+
+    def cleanup_post_import_queue_item(self, download_id: str) -> bool:
+        """
+        Clean up queue item after successful force import.
+
+        When using 'move' mode, the file is physically moved but the queue
+        item may persist. This method removes such items from the queue.
+
+        Args:
+            download_id: Download ID to look for in queue
+
+        Returns:
+            True if cleanup was performed, False otherwise
+        """
+        try:
+            # Get current queue
+            queue = self.get_queue()
+
+            for item in queue:
+                if item.get("downloadId") == download_id:
+                    if self.should_cleanup_queue_item(item):
+                        queue_id = item.get("id")
+                        logger.info(
+                            f"Cleaning up stuck queue item {queue_id} after successful import"
+                        )
+
+                        # Remove from queue but keep in download client
+                        success = self.remove_from_queue(
+                            queue_id, remove_from_client=False, blocklist=False
+                        )
+
+                        if success:
+                            logger.info(
+                                "✅ Successfully cleaned up post-import queue item"
+                            )
+                        else:
+                            logger.warning(
+                                "⚠️ Failed to clean up post-import queue item"
+                            )
+
+                        return success
+
+            logger.debug(f"No cleanup needed for download {download_id}")
+            return False
+
+        except Exception as e:
+            logger.error(
+                f"Failed to cleanup queue item for download {download_id}: {e}"
+            )
             return False
 
     def clear_cache(self):

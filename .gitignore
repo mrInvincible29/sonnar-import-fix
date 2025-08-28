@@ -140,6 +140,8 @@ config.yml
 # Environment files
 .env*
 !.env.example
+test.env
+*.env
 
 # Log files
 *.log
