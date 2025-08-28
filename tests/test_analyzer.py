@@ -179,10 +179,13 @@ class TestScoreAnalyzer:
             grab_score=100,
             current_score=80,
             is_private_tracker=False,
+            is_public_tracker=True,
+            is_unknown_tracker=False,
             grab_formats=['HDR', 'Atmos'],
             current_formats=['x265'],
             missing_formats=['HDR', 'Atmos'],
-            extra_formats=[]
+            extra_formats=[],
+            indexer='public_tracker'
         )
         
         assert decision['action'] == 'force_import'
@@ -194,10 +197,13 @@ class TestScoreAnalyzer:
             grab_score=80,
             current_score=100,
             is_private_tracker=True,
+            is_public_tracker=False,
+            is_unknown_tracker=False,
             grab_formats=['x265'],
             current_formats=['HDR', 'Atmos'],
             missing_formats=[],
-            extra_formats=['HDR', 'Atmos']
+            extra_formats=['HDR', 'Atmos'],
+            indexer='private_tracker'
         )
         
         assert decision['action'] == 'keep'
@@ -209,10 +215,13 @@ class TestScoreAnalyzer:
             grab_score=80,
             current_score=100,
             is_private_tracker=False,
+            is_public_tracker=True,
+            is_unknown_tracker=False,
             grab_formats=['x265'],
             current_formats=['HDR', 'Atmos'],
             missing_formats=[],
-            extra_formats=['HDR', 'Atmos']
+            extra_formats=['HDR', 'Atmos'],
+            indexer='public_tracker'
         )
         
         assert decision['action'] == 'remove'
@@ -224,10 +233,13 @@ class TestScoreAnalyzer:
             grab_score=85,
             current_score=80,
             is_private_tracker=False,
+            is_public_tracker=True,
+            is_unknown_tracker=False,
             grab_formats=['x265'],
             current_formats=['x264'],
             missing_formats=[],
-            extra_formats=[]
+            extra_formats=[],
+            indexer='public_tracker'
         )
         
         assert decision['action'] == 'wait'
@@ -239,14 +251,47 @@ class TestScoreAnalyzer:
             grab_score=None,
             current_score=80,
             is_private_tracker=False,
+            is_public_tracker=True,
+            is_unknown_tracker=False,
             grab_formats=[],
             current_formats=['x265'],
             missing_formats=[],
-            extra_formats=[]
+            extra_formats=[],
+            indexer='public_tracker'
         )
         
         assert decision['action'] == 'monitor'
         assert 'Unable to determine scores' in decision['reasoning']
+    
+    def test_make_decision_keep_unknown_tracker(self, analyzer):
+        """Test decision to keep unknown tracker despite lower score for safety"""
+        decision = analyzer._make_decision(
+            grab_score=80,
+            current_score=100,
+            is_private_tracker=False,
+            is_public_tracker=False,
+            is_unknown_tracker=True,
+            grab_formats=['x265'],
+            current_formats=['HDR', 'Atmos'],
+            missing_formats=[],
+            extra_formats=['HDR', 'Atmos'],
+            indexer='unknown_tracker'
+        )
+        
+        assert decision['action'] == 'keep'
+        assert 'Unknown tracker' in decision['reasoning']
+        assert 'keeping for safety' in decision['reasoning']
+    
+    def test_is_public_tracker_true(self, analyzer):
+        """Test is_public_tracker returns True for public tracker"""
+        assert analyzer.is_public_tracker('rarbg')
+        assert analyzer.is_public_tracker('RARBG Torrents')
+        
+    def test_is_public_tracker_false(self, analyzer):
+        """Test is_public_tracker returns False for non-public tracker"""
+        assert not analyzer.is_public_tracker('private_site')
+        assert not analyzer.is_public_tracker('')
+        assert not analyzer.is_public_tracker(None)
     
     def test_detect_repeated_grabs_normal(self, analyzer):
         """Test detecting repeated grabs - normal case"""
@@ -386,10 +431,13 @@ class TestDecisionLogic:
             grab_score=95,
             current_score=80,  # Difference = 15 (exactly at threshold)
             is_private_tracker=False,
+            is_public_tracker=True,
+            is_unknown_tracker=False,
             grab_formats=['HDR'],
             current_formats=['x265'],
             missing_formats=['HDR'],
-            extra_formats=[]
+            extra_formats=[],
+            indexer='public_tracker'
         )
         
         assert decision['action'] == 'force_import'
@@ -401,10 +449,13 @@ class TestDecisionLogic:
             grab_score=100,
             current_score=80,  # Difference = 20 (above threshold)
             is_private_tracker=False,
+            is_public_tracker=True,
+            is_unknown_tracker=False,
             grab_formats=['HDR', 'Atmos'],
             current_formats=['x265'],
             missing_formats=['HDR', 'Atmos'],
-            extra_formats=[]
+            extra_formats=[],
+            indexer='public_tracker'
         )
         
         assert decision['action'] == 'force_import'
@@ -417,10 +468,13 @@ class TestDecisionLogic:
             grab_score=65,
             current_score=80,  # Difference = -15 (exactly at negative threshold)
             is_private_tracker=False,
+            is_public_tracker=True,
+            is_unknown_tracker=False,
             grab_formats=['x265'],
             current_formats=['HDR'],
             missing_formats=[],
-            extra_formats=['HDR']
+            extra_formats=['HDR'],
+            indexer='public_tracker'
         )
         
         # At exactly -15 threshold, it's within tolerance, so should wait
@@ -433,10 +487,13 @@ class TestDecisionLogic:
             grab_score=50,
             current_score=100,  # Difference = -50 (well below threshold)
             is_private_tracker=True,
+            is_public_tracker=False,
+            is_unknown_tracker=False,
             grab_formats=['x265'],
             current_formats=['HDR', 'Atmos'],
             missing_formats=[],
-            extra_formats=['HDR', 'Atmos']
+            extra_formats=['HDR', 'Atmos'],
+            indexer='private_tracker'
         )
         
         assert decision['action'] == 'keep'
@@ -448,10 +505,13 @@ class TestDecisionLogic:
             grab_score=94,
             current_score=80,  # Difference = 14 (below 15 threshold)
             is_private_tracker=False,
+            is_public_tracker=True,
+            is_unknown_tracker=False,
             grab_formats=['HDR'],
             current_formats=['x265'],
             missing_formats=[],
-            extra_formats=[]
+            extra_formats=[],
+            indexer='public_tracker'
         )
         
         assert decision['action'] == 'wait'
@@ -463,10 +523,13 @@ class TestDecisionLogic:
             grab_score=66,
             current_score=80,  # Difference = -14 (above -15 threshold)
             is_private_tracker=False,
+            is_public_tracker=True,
+            is_unknown_tracker=False,
             grab_formats=['x265'],
             current_formats=['HDR'],
             missing_formats=[],
-            extra_formats=[]
+            extra_formats=[],
+            indexer='public_tracker'
         )
         
         assert decision['action'] == 'wait'
@@ -482,10 +545,13 @@ class TestEdgeCases:
             grab_score=0,
             current_score=0,
             is_private_tracker=False,
+            is_public_tracker=True,
+            is_unknown_tracker=False,
             grab_formats=[],
             current_formats=[],
             missing_formats=[],
-            extra_formats=[]
+            extra_formats=[],
+            indexer='public_tracker'
         )
         
         assert decision['action'] == 'wait'
@@ -496,10 +562,13 @@ class TestEdgeCases:
             grab_score=-10,
             current_score=0,  # Difference = -10 (within tolerance)
             is_private_tracker=False,
+            is_public_tracker=True,
+            is_unknown_tracker=False,
             grab_formats=[],
             current_formats=[],
             missing_formats=[],
-            extra_formats=[]
+            extra_formats=[],
+            indexer='public_tracker'
         )
         
         # -10 diff is within tolerance threshold (15), so should wait
@@ -512,10 +581,13 @@ class TestEdgeCases:
             grab_score=1000,
             current_score=500,
             is_private_tracker=False,
+            is_public_tracker=True,
+            is_unknown_tracker=False,
             grab_formats=['HDR', 'Atmos', 'DV'],
             current_formats=['x265'],
             missing_formats=['HDR', 'Atmos', 'DV'],
-            extra_formats=[]
+            extra_formats=[],
+            indexer='public_tracker'
         )
         
         assert decision['action'] == 'force_import'

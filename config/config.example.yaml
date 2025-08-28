@@ -53,8 +53,11 @@ webhook:
   import_check_delay: 600
 
 # Tracker classification for decision making
+# IMPORTANT: Trackers not listed in either category will be treated as unknown
+# and downloads will be kept for safety (to prevent accidental data loss)
 trackers:
   # Private trackers - protect ratio by not removing downloads
+  # Downloads from these trackers are NEVER removed, even with lower scores
   private:
     - beyondhd
     - bhd
@@ -66,8 +69,10 @@ trackers:
     - redacted
     - orpheus
     - blutopia
+    # Add your private trackers here
   
-  # Public trackers - safe to remove failed downloads
+  # Public trackers - safe to remove failed downloads  
+  # Downloads from these trackers may be removed if score is significantly lower
   public:
     - nyaa
     - animetosho
@@ -77,6 +82,12 @@ trackers:
     - yts
     - eztv
     - torrentgalaxy
+    # Add your public trackers here
+    
+  # Unknown trackers (not in either list above) will:
+  # - Be kept for safety even if score is lower
+  # - Generate warnings in logs to help you classify them
+  # - Require manual addition to either private or public list
 
 # Decision making thresholds
 decisions:

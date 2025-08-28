@@ -95,7 +95,11 @@ class TestEnvironmentOverrides:
         ]
         
         for env_value, expected in test_cases:
-            with patch.dict(os.environ, {'WEBHOOK_ENABLED': env_value}):
+            with patch.dict(os.environ, {
+                'WEBHOOK_ENABLED': env_value,
+                'SONARR_URL': 'http://test-sonarr:8989',
+                'SONARR_API_KEY': 'test-key-for-github-actions-123456789'
+            }):
                 with patch('src.config.loader.load_dotenv'):
                     with patch.object(Path, 'exists', return_value=False):
                         config = ConfigLoader()
@@ -105,7 +109,9 @@ class TestEnvironmentOverrides:
         """Test environment variable conversion to numeric types"""
         with patch.dict(os.environ, {
             'WEBHOOK_PORT': '9090',
-            'FORCE_IMPORT_THRESHOLD': '15'
+            'FORCE_IMPORT_THRESHOLD': '15',
+            'SONARR_URL': 'http://test-sonarr:8989',
+            'SONARR_API_KEY': 'test-key-for-github-actions-123456789'
         }):
             with patch('src.config.loader.load_dotenv'):
                 with patch.object(Path, 'exists', return_value=False):
@@ -116,7 +122,11 @@ class TestEnvironmentOverrides:
     
     def test_env_override_float_values(self):
         """Test environment variable conversion to float"""
-        with patch.dict(os.environ, {'MONITORING_INTERVAL': '60.5'}):
+        with patch.dict(os.environ, {
+            'MONITORING_INTERVAL': '60.5',
+            'SONARR_URL': 'http://test-sonarr:8989',
+            'SONARR_API_KEY': 'test-key-for-github-actions-123456789'
+        }):
             with patch('src.config.loader.load_dotenv'):
                 with patch.object(Path, 'exists', return_value=False):
                     config = ConfigLoader()
@@ -334,9 +344,13 @@ class TestNestedValueOperations:
     
     def test_get_nested_value_partial_path(self):
         """Test getting value when path partially exists"""
-        with patch('src.config.loader.load_dotenv'):
-            with patch.object(Path, 'exists', return_value=False):
-                config = ConfigLoader()
+        with patch.dict(os.environ, {
+            'SONARR_URL': 'http://test-sonarr:8989',
+            'SONARR_API_KEY': 'test-key-for-github-actions-123456789'
+        }):
+            with patch('src.config.loader.load_dotenv'):
+                with patch.object(Path, 'exists', return_value=False):
+                    config = ConfigLoader()
                 config.config = {'level1': 'not_dict'}
                 
                 result = config.get('level1.level2.value', 'default')
@@ -344,9 +358,13 @@ class TestNestedValueOperations:
     
     def test_set_nested_value_new_path(self):
         """Test setting nested value with new path"""
-        with patch('src.config.loader.load_dotenv'):
-            with patch.object(Path, 'exists', return_value=False):
-                config = ConfigLoader()
+        with patch.dict(os.environ, {
+            'SONARR_URL': 'http://test-sonarr:8989',
+            'SONARR_API_KEY': 'test-key-for-github-actions-123456789'
+        }):
+            with patch('src.config.loader.load_dotenv'):
+                with patch.object(Path, 'exists', return_value=False):
+                    config = ConfigLoader()
                 config.config = {}
                 
                 config._set_nested_value('new.nested.value', 'test')

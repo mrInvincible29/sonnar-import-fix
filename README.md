@@ -83,7 +83,7 @@ docker run -d \
   -e SONARR_API_KEY="your-actual-32-character-api-key" \
   -e WEBHOOK_SECRET="$(openssl rand -hex 32)" \
   -p 8090:8090 \
-  ghcr.io/mrInvincible29/sonarr-import-monitor:latest
+  ghcr.io/mrinvincible29/sonnar-import-fix:latest
 ```
 
 #### Option 2: Docker Compose (Production)
@@ -94,10 +94,10 @@ docker run -d \
 mkdir sonarr-import-monitor && cd sonarr-import-monitor
 
 # Download Docker Compose file
-wget -O docker-compose.yml https://raw.githubusercontent.com/mrInvincible29/sonarr-import-monitor/main/docker/docker-compose.yml
+wget -O docker-compose.yml https://raw.githubusercontent.com/mrInvincible29/sonnar-import-fix/main/docker/docker-compose.yml
 
 # Download environment template
-wget -O .env https://raw.githubusercontent.com/mrInvincible29/sonarr-import-monitor/main/.env.example
+wget -O .env https://raw.githubusercontent.com/mrInvincible29/sonnar-import-fix/main/.env.example
 ```
 
 **Step 2: Configure your environment**

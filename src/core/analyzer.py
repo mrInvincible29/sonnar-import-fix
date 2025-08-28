@@ -200,6 +200,26 @@ class ScoreAnalyzer:
 
         return False
 
+    def is_public_tracker(self, indexer: str) -> bool:
+        """
+        Check if indexer is a public tracker.
+
+        Args:
+            indexer: Indexer name
+
+        Returns:
+            True if public tracker, False otherwise
+        """
+        if not indexer:
+            return False
+
+        indexer_lower = indexer.lower()
+        for tracker in self.public_trackers:
+            if tracker.lower() in indexer_lower:
+                return True
+
+        return False
+
     def analyze_queue_item(self, queue_item: Dict) -> Decision:
         """
         Analyze a queue item and determine the appropriate action.
@@ -236,6 +256,8 @@ class ScoreAnalyzer:
         # Determine indexer from history
         indexer = self._find_indexer_from_history(history, download_id)
         is_private = self.is_private_tracker(indexer)
+        is_public = self.is_public_tracker(indexer)
+        is_unknown = not is_private and not is_public
 
         # Calculate format differences
         grab_formats_set = set(grab_formats)
@@ -258,10 +280,13 @@ class ScoreAnalyzer:
             grab_score=grab_score,
             current_score=current_score,
             is_private_tracker=is_private,
+            is_public_tracker=is_public,
+            is_unknown_tracker=is_unknown,
             grab_formats=grab_formats,
             current_formats=current_formats,
             missing_formats=missing_formats,
             extra_formats=extra_formats,
+            indexer=indexer,
         )
 
         return Decision(
@@ -338,10 +363,13 @@ class ScoreAnalyzer:
         grab_score: Optional[int],
         current_score: Optional[int],
         is_private_tracker: bool,
+        is_public_tracker: bool,
+        is_unknown_tracker: bool,
         grab_formats: List[str],
         current_formats: List[str],
         missing_formats: List[str],
         extra_formats: List[str],
+        indexer: str,
     ) -> Dict[str, str]:
         """
         Make import decision based on analysis.
@@ -372,10 +400,17 @@ class ScoreAnalyzer:
                 reasoning = f"Private tracker protection - keeping despite lower score (diff: {score_diff})"
                 logger.info(f"   ⏸️ Action: Keep - {reasoning}")
                 return {"action": "keep", "reasoning": reasoning}
-            else:
+            elif is_public_tracker:
                 reasoning = f"Public tracker with lower score (grab: {grab_score}, current: {current_score}, diff: {score_diff})"
                 logger.info(f"   🗑️ Action: Remove - {reasoning}")
                 return {"action": "remove", "reasoning": reasoning}
+            else:  # is_unknown_tracker
+                reasoning = f"Unknown tracker '{indexer}' - keeping for safety despite lower score (diff: {score_diff})"
+                logger.warning(f"   ⚠️ Action: Keep (unknown tracker) - {reasoning}")
+                logger.warning(
+                    f"   💡 Consider adding '{indexer}' to either private or public tracker list in config"
+                )
+                return {"action": "keep", "reasoning": reasoning}
 
         else:
             reasoning = f"Score difference ({score_diff}) within tolerance threshold ({self.force_import_threshold})"

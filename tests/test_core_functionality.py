@@ -111,10 +111,13 @@ class TestWorkingAnalyzer:
             grab_score=100,
             current_score=80,  # Difference = 20 (above threshold of 10)
             is_private_tracker=False,
+            is_public_tracker=True,
+            is_unknown_tracker=False,
             grab_formats=['HDR'],
             current_formats=['x265'],
             missing_formats=['HDR'],
-            extra_formats=[]
+            extra_formats=[],
+            indexer='public_tracker'
         )
         
         assert decision['action'] == 'force_import'
@@ -136,10 +139,13 @@ class TestWorkingAnalyzer:
             grab_score=60,
             current_score=100,  # Grab is worse
             is_private_tracker=True,
+            is_public_tracker=False,
+            is_unknown_tracker=False,
             grab_formats=['x265'],
             current_formats=['HDR'],
             missing_formats=[],
-            extra_formats=[]
+            extra_formats=[],
+            indexer='private_tracker'
         )
         
         assert decision['action'] == 'keep'
