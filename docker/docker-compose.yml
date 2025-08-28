@@ -47,7 +47,7 @@ services:
     
     # Port mapping
     ports:
-      - "${WEBHOOK_PORT:-8090}:8090"
+      - "${WEBHOOK_PORT:-8090}:${WEBHOOK_PORT:-8090}"
     
     # Volume mounts
     volumes:
