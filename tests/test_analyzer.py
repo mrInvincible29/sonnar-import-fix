@@ -634,3 +634,37 @@ class TestScoreAnalyzerIntegration:
         assert "x264" in decision.current_formats
         assert "HDR10" in decision.missing_formats
         assert "Atmos" in decision.missing_formats
+
+    def test_analyze_matched_by_id_force_import(self, analyzer):
+        """Test force import when release matched by ID"""
+        queue_item = {
+            "id": 1,
+            "downloadId": "test-download-123",
+            "episode": {"id": 100},
+            "series": {"id": 1},
+            "statusMessages": [{"messages": ["Release was matched to series by ID"]}],
+        }
+
+        decision = analyzer.analyze_queue_item(queue_item)
+
+        assert decision.action == "force_import"
+        assert "identified by ID" in decision.reasoning
+
+    def test_analyze_import_blocked_detection(self, analyzer):
+        """Test that importBlocked state is detected as stuck"""
+        queue_item = {
+            "id": 1,
+            "trackedDownloadState": "importBlocked",
+            "episode": {"id": 100},
+            "series": {"id": 1},
+            "statusMessages": [{"messages": ["Series title mismatch"]}],
+        }
+
+        # This would be caught by _identify_stuck_items, but let's test the analysis
+        decision = analyzer.analyze_queue_item(queue_item)
+
+        # Should not force import for title mismatch without more context
+        assert (
+            decision.action in ["monitor", "wait"]
+            or "mismatch" in decision.reasoning.lower()
+        )

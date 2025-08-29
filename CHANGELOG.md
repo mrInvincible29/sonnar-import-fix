@@ -5,6 +5,25 @@ All notable changes to Sonarr Import Monitor will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2025-08-29
+
+### ⚠️ Breaking Changes
+- **Webhook Compatibility**: This version requires Sonarr v4+ webhook configuration. The "ImportFailed" webhook event does not exist in Sonarr - you must enable "On Manual Interaction Required" instead.
+
+### Fixed
+- **Webhook Events**: Corrected webhook handling to use actual Sonarr v4 events
+  - Removed handling for non-existent "ImportFailed" event  
+  - Added proper "ManualInteractionRequired" event handler
+
+### Added
+- **Force Import Expansion**: Now automatically force imports releases "matched by ID"
+- **Enhanced Detection**: Added detection for `importBlocked` state
+- **Download ID Tracking**: New queue check method by download ID for webhook events
+
+### Changed
+- Updated documentation to reflect correct Sonarr webhook configuration
+- Enhanced status message checking to include "matched to series by id"
+
 ## [2.1.0] - 2025-08-28
 
 ⚠️ **IMPORTANT**: Previous versions (v2.0.0 - v2.0.3) had a critical bug where force imports appeared to work but were not actually importing files. If you were using these versions, your stuck imports were likely not being resolved. Please upgrade to v2.1.0 immediately.

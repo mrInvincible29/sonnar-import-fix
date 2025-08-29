@@ -235,7 +235,7 @@ class WebhookServer:
                     "Test": self.handle_test,
                     "Grab": self.handle_grab,
                     "Download": self.handle_download,
-                    "ImportFailed": self.handle_import_failed,
+                    "ManualInteractionRequired": self.handle_manual_interaction,
                     "HealthIssue": self.handle_health_issue,
                 }
 
@@ -264,7 +264,7 @@ class WebhookServer:
                             "Test",
                             "Grab",
                             "Download",
-                            "ImportFailed",
+                            "ManualInteractionRequired",
                             "HealthIssue",
                         ],
                         "authentication_required": bool(self.webhook_secret),
@@ -416,37 +416,40 @@ class WebhookServer:
             logger.error(f"Error handling download webhook: {e}")
             return jsonify({"error": str(e)}), 500
 
-    def handle_import_failed(self, data: Dict[str, Any]) -> tuple:
-        """Handle import failure notification."""
+    def handle_manual_interaction(self, data: Dict[str, Any]) -> tuple:
+        """Handle ManualInteractionRequired webhook."""
         try:
-            episodes = data.get("episodes", [])
+            download_id = data.get("downloadId")
             series = data.get("series", {})
-            message = data.get("message", "Unknown error")
+            status_messages = data.get("downloadStatusMessages", [])
 
-            logger.warning(f"❌ Import failed: {series.get('title', 'Unknown')}")
-            logger.warning(f"   Message: {message}")
+            logger.warning(
+                f"⚠️ Manual interaction required: {series.get('title', 'Unknown')}"
+            )
 
-            # Trigger immediate queue check for affected episodes
-            for episode in episodes:
-                ep_id = episode["id"]
-                logger.info(f"   Scheduling immediate check for episode {ep_id}")
+            # Log status messages for debugging
+            for msg in status_messages:
+                if msg.get("messages"):
+                    logger.info(f"   Status: {msg.get('messages')}")
 
-                # Schedule immediate check
-                self._schedule_immediate_check(ep_id)
+            # Schedule immediate check for this download
+            if download_id:
+                logger.info(f"   Scheduling immediate check for download {download_id}")
+                self._schedule_immediate_check_by_download_id(download_id)
 
             return (
                 jsonify(
                     {
                         "status": "success",
-                        "message": "Import failure processed",
-                        "episodes_scheduled": len(episodes),
+                        "message": "Manual interaction webhook received",
+                        "download_id": download_id,
                     }
                 ),
                 200,
             )
 
         except Exception as e:
-            logger.error(f"Error handling import failed webhook: {e}")
+            logger.error(f"Error handling manual interaction webhook: {e}")
             return jsonify({"error": str(e)}), 500
 
     def handle_health_issue(self, data: Dict[str, Any]) -> tuple:
@@ -474,6 +477,14 @@ class WebhookServer:
     def _schedule_immediate_check(self, episode_id: int):
         """Schedule immediate queue check."""
         timer = threading.Timer(5, self.monitor.check_episode_queue, args=[episode_id])
+        timer.daemon = True
+        timer.start()
+
+    def _schedule_immediate_check_by_download_id(self, download_id: str):
+        """Schedule immediate queue check by download ID."""
+        timer = threading.Timer(
+            5, self.monitor.check_download_queue, args=[download_id]
+        )
         timer.daemon = True
         timer.start()
 

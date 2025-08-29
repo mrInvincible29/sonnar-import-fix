@@ -8,6 +8,15 @@
 
 An automated, production-ready solution to fix the infamous Sonarr import scoring issue where releases are grabbed with higher scores (using complete metadata) but fail to import due to lower scores (using filename only).
 
+## ⚠️ Compatibility Notice
+
+**Version 2.2.0+ requires Sonarr v4 or later**
+
+Previous versions incorrectly expected an "ImportFailed" webhook event that doesn't exist in Sonarr. 
+You MUST enable "On Manual Interaction Required" in your Sonarr webhook settings for stuck import detection to work.
+
+If you're using an older version of Sonarr, please use v2.1.x releases.
+
 ## The Problem
 
 Sonarr has a scoring discrepancy between grab and import:
@@ -182,9 +191,15 @@ Value: your-webhook-secret-from-env-file
 **Step 4: Enable events**
 Check these notification triggers:
 - ✅ On Grab
-- ✅ On Import  
-- ✅ On Import Failure
+- ✅ On Import (formerly "On Download")
+- ✅ On Manual Interaction Required (CRITICAL for stuck imports)
 - ✅ On Health Issue
+
+**Important**: The "On Manual Interaction Required" webhook is essential for detecting:
+- Series title mismatches
+- Unparseable downloads  
+- Releases matched by ID instead of name
+- Other import issues requiring intervention
 
 **Step 5: Test and save**
 - Click "Test" - you should see success in both Sonarr and the container logs
@@ -274,9 +289,8 @@ python3 sonarr_import_monitor.py --webhook
 
 ### 3. Enable these notification triggers:
 - ✅ **On Grab**
-- ✅ **On Import** 
-- ✅ **On Download Failure**
-- ✅ **On Import Failure**
+- ✅ **On Import** (formerly "On Download")
+- ✅ **On Manual Interaction Required** (Essential for stuck imports!)
 - ✅ **On Health Issue**
 
 ### 4. Test the webhook:

@@ -143,17 +143,19 @@ class TestCompleteWorkflow:
             # Mock force import
             m.get(
                 "http://test-sonarr:8989/api/v3/manualimport",
-                json=[{
-                    "id": 1, 
-                    "path": "/test.mkv", 
-                    "series": {"id": 10, "title": "Test Series"},
-                    "episodes": [{"id": 100, "title": "Test Episode"}]
-                }],
+                json=[
+                    {
+                        "id": 1,
+                        "path": "/test.mkv",
+                        "series": {"id": 10, "title": "Test Series"},
+                        "episodes": [{"id": 100, "title": "Test Episode"}],
+                    }
+                ],
             )
             m.post(
-                "http://test-sonarr:8989/api/v3/command", 
+                "http://test-sonarr:8989/api/v3/command",
                 json={"name": "ManualImport", "id": 123},
-                status_code=201
+                status_code=201,
             )
 
             results = monitor.process_stuck_imports()
@@ -225,18 +227,21 @@ class TestWebhookToMonitorIntegration:
         # Should have processed the queue item
         monitor.process_queue_item.assert_called_once_with(mock_queue_item)
 
-    def test_import_failed_triggers_immediate_check(self, integrated_system):
-        """Test that import failed webhook triggers immediate queue check"""
+    def test_manual_interaction_triggers_immediate_check(self, integrated_system):
+        """Test that ManualInteractionRequired webhook triggers immediate queue check"""
         monitor, webhook_server, config = integrated_system
 
         # Mock monitor method
-        monitor.check_episode_queue = MagicMock()
+        monitor.check_download_queue = MagicMock()
 
-        # Simulate import failed event
-        failed_data = {
-            "eventType": "ImportFailed",
-            "episodes": [{"id": 100}],
-            "message": "File not found",
+        # Simulate manual interaction event
+        manual_data = {
+            "eventType": "ManualInteractionRequired",
+            "downloadId": "test-download-123",
+            "series": {"title": "Test Series"},
+            "downloadStatusMessages": [
+                {"messages": ["Release was matched to series by ID"]}
+            ],
         }
 
         with patch("threading.Timer") as mock_timer:
@@ -244,11 +249,11 @@ class TestWebhookToMonitorIntegration:
             mock_timer.return_value = mock_timer_instance
 
             with webhook_server.app.app_context():
-                webhook_server.handle_import_failed(failed_data)
+                webhook_server.handle_manual_interaction(manual_data)
 
             # Should schedule immediate check
             mock_timer.assert_called_once_with(
-                5, monitor.check_episode_queue, args=[100]
+                5, monitor.check_download_queue, args=["test-download-123"]
             )
             mock_timer_instance.start.assert_called_once()
 

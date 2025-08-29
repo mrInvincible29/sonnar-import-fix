@@ -322,28 +322,30 @@ class TestWebhookHandlers:
             warning_calls = [call for call in mock_logger.warning.call_args_list]
             assert any("Score mismatch" in str(call) for call in warning_calls)
 
-    def test_handle_import_failed_webhook(self, webhook_server):
-        """Test handling import failed webhook"""
+    def test_handle_manual_interaction_webhook(self, webhook_server):
+        """Test handling ManualInteractionRequired webhook"""
         with patch("threading.Timer") as mock_timer:
             mock_timer_instance = MagicMock()
             mock_timer.return_value = mock_timer_instance
 
-            failed_payload = {
-                "eventType": "ImportFailed",
+            manual_payload = {
+                "eventType": "ManualInteractionRequired",
                 "series": {"title": "Test Series"},
-                "episodes": [{"id": 100}],
-                "message": "Import failed: File not found",
+                "downloadId": "test-download-123",
+                "downloadStatusMessages": [
+                    {"messages": ["Release was matched to series by ID"]}
+                ],
             }
 
             with webhook_server.app.app_context():
-                response, status_code = webhook_server.handle_import_failed(
-                    failed_payload
+                response, status_code = webhook_server.handle_manual_interaction(
+                    manual_payload
                 )
 
             assert status_code == 200
             data = response.get_json()
             assert data["status"] == "success"
-            assert data["episodes_scheduled"] == 1
+            assert data["download_id"] == "test-download-123"
 
             # Should schedule immediate check
             mock_timer.assert_called_once()
@@ -942,18 +944,20 @@ class TestWebhookIntegration:
                 },
             )
 
-        # Step 2: Receive import failed webhook
-        failed_payload = {
-            "eventType": "ImportFailed",
+        # Step 2: Receive manual interaction webhook
+        manual_payload = {
+            "eventType": "ManualInteractionRequired",
             "series": {"title": "Test Series"},
-            "episodes": [{"id": 100}],
-            "message": "Import failed",
+            "downloadId": "test-download-123",
+            "downloadStatusMessages": [
+                {"messages": ["Release was matched to series by ID"]}
+            ],
         }
 
         with patch("threading.Timer") as mock_timer:
             response = client.post(
                 "/webhook/sonarr",
-                data=json.dumps(failed_payload),
+                data=json.dumps(manual_payload),
                 headers={
                     "Content-Type": "application/json",
                     "X-Webhook-Secret": "integration-test-secret",

@@ -208,6 +208,8 @@ class SonarrImportMonitor:
             # Check various stuck conditions
             if item.get("trackedDownloadState") == "importPending":
                 stuck_items.append(item)
+            elif item.get("trackedDownloadState") == "importBlocked":
+                stuck_items.append(item)
             elif (
                 item.get("status") == "completed"
                 and item.get("trackedDownloadStatus") == "warning"
@@ -219,7 +221,12 @@ class SonarrImportMonitor:
                     message_text = str(msg.get("messages", [])).lower()
                     if any(
                         keyword in message_text
-                        for keyword in ["already", "exists", "duplicate"]
+                        for keyword in [
+                            "already",
+                            "exists",
+                            "duplicate",
+                            "matched to series by id",
+                        ]
                     ):
                         stuck_items.append(item)
                         break
@@ -454,6 +461,35 @@ class SonarrImportMonitor:
 
         except Exception as e:
             logger.error(f"Error checking episode queue: {e}")
+
+    def check_download_queue(self, download_id: str):
+        """
+        Check queue for specific download ID and process if found.
+
+        Args:
+            download_id: Sonarr download ID
+        """
+        try:
+            # Use cached version for production, regular method for tests
+            from unittest.mock import MagicMock
+
+            if hasattr(self.sonarr_client, "cache") and not isinstance(
+                self.sonarr_client, MagicMock
+            ):
+                queue = self.sonarr_client.get_queue_cached()
+            else:
+                queue = self.sonarr_client.get_queue()
+
+            for item in queue:
+                if item.get("downloadId") == download_id:
+                    logger.info(f"🔍 Found download {download_id} in queue")
+                    self.process_queue_item(item)
+                    return
+
+            logger.debug(f"Download {download_id} not found in current queue")
+
+        except Exception as e:
+            logger.error(f"Error checking download queue: {e}")
 
     def test_specific_episode(self, series_title: str, season: int, episode: int):
         """

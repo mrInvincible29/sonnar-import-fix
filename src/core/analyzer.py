@@ -236,6 +236,25 @@ class ScoreAnalyzer:
         series_id = series.get("id") if series else None
         download_id = queue_item.get("downloadId")
 
+        # Check for "matched by ID" case - force import when series is known but name mismatch
+        status_messages = queue_item.get("statusMessages", [])
+        for msg in status_messages:
+            message_text = str(msg.get("messages", [])).lower()
+            if "matched to series by id" in message_text:
+                logger.info("   🆔 Release matched by ID - forcing import")
+                return Decision(
+                    action="force_import",
+                    reasoning="Series identified by ID despite name mismatch",
+                    grab_score=None,
+                    current_score=None,
+                    score_difference=None,
+                    grab_formats=[],
+                    current_formats=[],
+                    missing_formats=[],
+                    extra_formats=[],
+                    is_private_tracker=False,
+                )
+
         # Get episode history
         history = (
             self.sonarr_client.get_history_for_episode(episode_id) if episode_id else []
