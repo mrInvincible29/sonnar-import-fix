@@ -488,7 +488,7 @@ class SonarrClient:
 
         if not import_items and output_path:
             logger.debug(f"Folder-based manual import fallback for: {output_path}")
-            fallback_params = {
+            fallback_params: Dict[str, object] = {
                 "folder": output_path,
                 "filterExistingFiles": "false",
             }
