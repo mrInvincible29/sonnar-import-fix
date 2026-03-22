@@ -50,6 +50,7 @@ class ScoreAnalyzer:
         """
         self.config = config
         self.sonarr_client = sonarr_client
+        self.app_type = getattr(sonarr_client, "app_type", "sonarr")
         self.force_import_threshold = config.get("decisions.force_import_threshold", 10)
         self.private_trackers = config.get("trackers.private", [])
         self.public_trackers = config.get("trackers.public", [])
@@ -134,49 +135,58 @@ class ScoreAnalyzer:
         return None, []
 
     def get_current_file_details(
-        self, episode_id: int, series_id: Optional[int] = None
+        self, content_id: int, profile_id: Optional[int] = None
     ) -> Tuple[Optional[int], List[str]]:
         """
-        Get current episode file's score and format details.
+        Get current episode/movie file's score and format details.
 
         Args:
-            episode_id: Sonarr episode ID
-            series_id: Series ID for score calculation (optional)
+            content_id: Sonarr episode ID or Radarr movie ID
+            profile_id: Series/movie ID for score calculation (optional)
 
         Returns:
             Tuple of (score, format_names)
         """
         try:
-            # Get episode details
-            response = self.sonarr_client._make_request("GET", f"/episode/{episode_id}")
-            episode = response.json()
+            if self.app_type == "radarr":
+                response = self.sonarr_client._make_request(
+                    "GET", f"/movie/{content_id}"
+                )
+                content = response.json()
+                file_id_key = "movieFileId"
+            else:
+                response = self.sonarr_client._make_request(
+                    "GET", f"/episode/{content_id}"
+                )
+                content = response.json()
+                file_id_key = "episodeFileId"
 
-            if not episode.get("hasFile"):
+            if not content.get("hasFile"):
                 return None, []
 
-            episode_file_id = episode.get("episodeFileId")
-            if not episode_file_id:
+            file_id = content.get(file_id_key)
+            if not file_id:
                 return None, []
 
             # Get file details
-            file_data = self.sonarr_client.get_episode_file(episode_file_id)
+            file_data = self.sonarr_client.get_episode_file(file_id)
             if not file_data:
                 return None, []
 
             score = file_data.get("customFormatScore", 0)
             formats = file_data.get("customFormats", [])
 
-            if series_id and not score and formats:
-                # Calculate score if not in file data
-                analysis = self.analyze_custom_formats(formats, series_id)
+            if profile_id and not score and formats:
+                analysis = self.analyze_custom_formats(formats, profile_id)
                 score = analysis.total_score
 
             format_names = [cf.get("name", "Unknown") for cf in formats]
             return score, format_names
 
         except Exception as e:
+            label = "movie" if self.app_type == "radarr" else "episode"
             logger.error(
-                f"Failed to get current file details for episode {episode_id}: {e}"
+                f"Failed to get current file details for {label} {content_id}: {e}"
             )
             return None, []
 
@@ -230,21 +240,32 @@ class ScoreAnalyzer:
         Returns:
             Decision object with action and reasoning
         """
-        episode = queue_item.get("episode", {})
-        episode_id = episode.get("id")
-        series = queue_item.get("series", {})
-        series_id = series.get("id") if series else None
+        if self.app_type == "radarr":
+            movie = queue_item.get("movie", {})
+            content_id = movie.get("id")
+            profile_id = content_id  # movie ID used for profile lookup
+        else:
+            episode = queue_item.get("episode", {})
+            content_id = episode.get("id")
+            series = queue_item.get("series", {})
+            profile_id = series.get("id") if series else None
         download_id = queue_item.get("downloadId")
 
-        # Check for "matched by ID" case - force import when series is known but name mismatch
+        # Check for "matched by ID" case - force import when content is known but name mismatch
+        matched_pattern = (
+            "matched to movie by id"
+            if self.app_type == "radarr"
+            else "matched to series by id"
+        )
         status_messages = queue_item.get("statusMessages", [])
         for msg in status_messages:
             message_text = str(msg.get("messages", [])).lower()
-            if "matched to series by id" in message_text:
+            if matched_pattern in message_text:
+                label = "Movie" if self.app_type == "radarr" else "Series"
                 logger.info("   🆔 Release matched by ID - forcing import")
                 return Decision(
                     action="force_import",
-                    reasoning="Series identified by ID despite name mismatch",
+                    reasoning=f"{label} identified by ID despite name mismatch",
                     grab_score=None,
                     current_score=None,
                     score_difference=None,
@@ -255,17 +276,17 @@ class ScoreAnalyzer:
                     is_private_tracker=False,
                 )
 
-        # Get episode history
+        # Get history
         history = (
-            self.sonarr_client.get_history_for_episode(episode_id) if episode_id else []
+            self.sonarr_client.get_history_for_episode(content_id) if content_id else []
         )
 
         # Find grab information
-        grab_score, grab_formats = self.find_grab_info(history, download_id, series_id)
+        grab_score, grab_formats = self.find_grab_info(history, download_id, profile_id)
 
         # Get current file information
         current_score, current_formats = self.get_current_file_details(
-            episode_id, series_id
+            content_id, profile_id
         )
 
         # Treat no current file as score 0 for decision making
@@ -346,26 +367,29 @@ class ScoreAnalyzer:
         indexer: str,
     ):
         """Log detailed analysis information."""
-        episode = queue_item.get("episode", {})
-        series = queue_item.get("series", {})
+        if self.app_type == "radarr":
+            movie = queue_item.get("movie", {})
+            title = movie.get("title", "Unknown")
+            year = movie.get("year", "")
+            label = f"{title} ({year})" if year else title
+        else:
+            episode = queue_item.get("episode", {})
+            series = queue_item.get("series", {})
+            label = (
+                f"{series.get('title', 'Unknown')} "
+                f"S{episode.get('seasonNumber', 0):02d}"
+                f"E{episode.get('episodeNumber', 0):02d}"
+            )
 
-        logger.info(
-            f"\n📊 Analyzing: {series.get('title', 'Unknown')} "
-            f"S{episode.get('seasonNumber', 0):02d}E{episode.get('episodeNumber', 0):02d}"
+        logger.debug(
+            f"Analyzing: {label} | grab={grab_score} current={current_score} | {indexer}"
         )
-        logger.info(f"   Title: {queue_item.get('title', 'N/A')}")
-        logger.info(f"   Status: {queue_item.get('status', 'Unknown')}")
-        logger.info(f"   Grab Score: {grab_score}")
+        logger.debug(f"   Title: {queue_item.get('title', 'N/A')}")
 
         if grab_formats:
-            logger.info(f"   Grab Formats: {', '.join(grab_formats)}")
-
-        logger.info(f"   Current File Score: {current_score}")
-
+            logger.debug(f"   Grab Formats: {', '.join(grab_formats)}")
         if current_formats:
-            logger.info(f"   Current Formats: {', '.join(current_formats)}")
-
-        logger.info(f"   Indexer: {indexer}")
+            logger.debug(f"   Current Formats: {', '.join(current_formats)}")
 
         # Show format differences
         if grab_formats and current_formats:
@@ -373,9 +397,9 @@ class ScoreAnalyzer:
             extra = set(current_formats) - set(grab_formats)
 
             if missing:
-                logger.info(f"   📉 Missing from current: {', '.join(missing)}")
+                logger.debug(f"   Missing from current: {', '.join(missing)}")
             if extra:
-                logger.info(f"   📈 Extra in current: {', '.join(extra)}")
+                logger.debug(f"   Extra in current: {', '.join(extra)}")
 
     def _make_decision(
         self,
@@ -411,20 +435,20 @@ class ScoreAnalyzer:
                     f". Missing formats: {', '.join(list(missing_formats)[:3])}"
                 )
 
-            logger.info(f"   ⚡ Action: Force import - {reasoning}")
+            logger.info(f"   Force import: {reasoning}")
             return {"action": "force_import", "reasoning": reasoning}
 
         elif score_diff < -self.force_import_threshold:
             if is_private_tracker:
                 reasoning = f"Private tracker protection - keeping despite lower score (diff: {score_diff})"
-                logger.info(f"   ⏸️ Action: Keep - {reasoning}")
+                logger.debug(f"   Keep: {reasoning}")
                 return {"action": "keep", "reasoning": reasoning}
             elif is_public_tracker:
                 reasoning = (
                     f"Public tracker with lower score "
                     f"(grab: {grab_score}, current: {current_score}, diff: {score_diff})"
                 )
-                logger.info(f"   🗑️ Action: Remove - {reasoning}")
+                logger.debug(f"   Remove: {reasoning}")
                 return {"action": "remove", "reasoning": reasoning}
             else:  # is_unknown_tracker
                 reasoning = f"Unknown tracker '{indexer}' - keeping for safety despite lower score (diff: {score_diff})"
@@ -436,7 +460,7 @@ class ScoreAnalyzer:
 
         else:
             reasoning = f"Score difference ({score_diff}) within tolerance threshold ({self.force_import_threshold})"
-            logger.info(f"   ⏳ Action: Wait - {reasoning}")
+            logger.debug(f"   Wait: {reasoning}")
             return {"action": "wait", "reasoning": reasoning}
 
     def detect_repeated_grabs(self, episode_id: int) -> List[Dict]:

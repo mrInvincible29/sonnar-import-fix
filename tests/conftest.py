@@ -56,6 +56,54 @@ def mock_sonarr_queue_item():
         "downloadClient": "qBittorrent",
         "indexer": "TestTracker",
         "quality": {"quality": {"id": 6, "name": "720p HDTV"}, "customFormats": []},
+        "outputPath": "/downloads/complete/tv/Test.Episode.S01E01",
+        "statusMessages": [],
+    }
+
+
+@pytest.fixture
+def mock_radarr_config():
+    """Provide test configuration for Radarr"""
+    return {
+        "app": {"type": "radarr"},
+        "radarr": {
+            "url": "http://test-radarr:7878",
+            "api_key": "test-key-123456789012345678901234567890",
+        },
+        "webhook": {
+            "secret": "test-secret-123456789012345678901234567890",
+            "port": 8090,
+            "enabled": False,
+        },
+        "decisions": {"force_import_threshold": 10, "remove_stuck_threshold_hours": 24},
+        "trackers": {
+            "private": ["privatehd", "beyondhd", "passthepopcorn"],
+            "public": ["nyaa", "rarbg", "animetosho"],
+        },
+        "logging": {"level": "DEBUG", "format": "text"},
+    }
+
+
+@pytest.fixture
+def mock_radarr_queue_item():
+    """Mock Radarr queue item"""
+    return {
+        "id": 1,
+        "movie": {
+            "id": 50,
+            "title": "Test Movie",
+            "year": 2024,
+            "hasFile": False,
+        },
+        "downloadId": "abc123def456",
+        "status": "completed",
+        "trackedDownloadState": "importPending",
+        "size": 2147483648,  # 2GB
+        "downloadClient": "qBittorrent",
+        "indexer": "TestTracker",
+        "quality": {"quality": {"id": 6, "name": "Bluray-1080p"}, "customFormats": []},
+        "outputPath": "/downloads/complete/movies/Test.Movie.2024",
+        "statusMessages": [],
     }
 
 

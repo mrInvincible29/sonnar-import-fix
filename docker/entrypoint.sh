@@ -1,77 +1,53 @@
 #!/bin/bash
 set -e
 
-# Entrypoint script for Sonarr Import Monitor Docker container
+# Entrypoint script for Sonarr/Radarr Import Monitor
 
-# Function to handle shutdown signals gracefully
 shutdown_handler() {
-    echo "Received shutdown signal, stopping Sonarr Import Monitor..."
-    # Send SIGTERM to the Python process
+    echo "Shutting down Import Monitor..."
     if [ ! -z "$PYTHON_PID" ]; then
         kill -TERM "$PYTHON_PID" 2>/dev/null || true
         wait "$PYTHON_PID" 2>/dev/null || true
     fi
-    echo "Shutdown complete"
     exit 0
 }
 
-# Set up signal handlers
 trap shutdown_handler SIGTERM SIGINT
 
-# Validate required environment variables
-if [ -z "$SONARR_URL" ]; then
-    echo "ERROR: SONARR_URL environment variable is required"
-    echo "Please set SONARR_URL to your Sonarr server URL (e.g., http://sonarr:8989)"
-    exit 1
-fi
+APP_TYPE="${APP_TYPE:-sonarr}"
 
-if [ -z "$SONARR_API_KEY" ]; then
-    echo "ERROR: SONARR_API_KEY environment variable is required"
-    echo "Get your API key from Sonarr Settings > General > Security > API Key"
-    exit 1
-fi
-
-# Check if API key looks valid (32 hex characters)
-if ! echo "$SONARR_API_KEY" | grep -qE '^[a-fA-F0-9]{32}$'; then
-    echo "WARNING: SONARR_API_KEY doesn't match typical Sonarr API key format"
-    echo "Expected: 32 hexadecimal characters"
-fi
-
-# Show startup information
-echo "🚀 Starting Sonarr Import Monitor v2.0.0"
-echo "   Platform: $(uname -m)"
-echo "   Python: $(python --version)"
-echo "   Sonarr URL: $SONARR_URL"
-echo "   Webhook Port: ${WEBHOOK_PORT:-8090}"
-echo "   Log Level: ${LOG_LEVEL:-INFO}"
-echo "   Log Format: ${LOG_FORMAT:-json}"
-
-# Check if running with webhook
-if [[ "$*" == *"--webhook"* ]] || [ "${WEBHOOK_ENABLED:-true}" = "true" ]; then
-    echo "   Webhook Server: Enabled"
-    if [ -n "$WEBHOOK_SECRET" ]; then
-        echo "   Webhook Auth: Enabled (secret configured)"
-    else
-        echo "   Webhook Auth: Auto-generating secret"
+# Validate required environment variables based on app type
+if [ "$APP_TYPE" = "radarr" ]; then
+    if [ -z "$RADARR_URL" ]; then
+        echo "ERROR: RADARR_URL is required for Radarr mode"
+        exit 1
     fi
+    if [ -z "$RADARR_API_KEY" ]; then
+        echo "ERROR: RADARR_API_KEY is required for Radarr mode"
+        exit 1
+    fi
+    if ! echo "$RADARR_API_KEY" | grep -qE '^[a-fA-F0-9]{32}$'; then
+        echo "WARNING: RADARR_API_KEY doesn't match typical API key format (32 hex chars)"
+    fi
+    echo "Starting Radarr Import Monitor | URL: $RADARR_URL"
 else
-    echo "   Webhook Server: Disabled"
+    if [ -z "$SONARR_URL" ]; then
+        echo "ERROR: SONARR_URL is required"
+        exit 1
+    fi
+    if [ -z "$SONARR_API_KEY" ]; then
+        echo "ERROR: SONARR_API_KEY is required"
+        exit 1
+    fi
+    if ! echo "$SONARR_API_KEY" | grep -qE '^[a-fA-F0-9]{32}$'; then
+        echo "WARNING: SONARR_API_KEY doesn't match typical API key format (32 hex chars)"
+    fi
+    echo "Starting Sonarr Import Monitor | URL: $SONARR_URL"
 fi
 
-# Dry run mode check
-if [[ "$*" == *"--dry-run"* ]] || [ "${DRY_RUN:-false}" = "true" ]; then
-    echo "   🔸 DRY RUN MODE - No changes will be made"
-fi
-
-echo ""
-
-# Change to app directory
 cd /app
 
-# Start the application with all passed arguments
-echo "Starting application..."
 python main.py "$@" &
 PYTHON_PID=$!
 
-# Wait for the Python process to finish
 wait "$PYTHON_PID"

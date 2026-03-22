@@ -141,7 +141,7 @@ def setup_logging(
 
     # Log setup completion
     logger = logging.getLogger(__name__)
-    logger.info(f"Logging initialized: level={level}, format={format_type}")
+    logger.debug(f"Logging initialized: level={level}, format={format_type}")
 
 
 def get_logger(name: str) -> logging.Logger:

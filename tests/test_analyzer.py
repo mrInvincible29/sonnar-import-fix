@@ -668,3 +668,75 @@ class TestScoreAnalyzerIntegration:
             decision.action in ["monitor", "wait"]
             or "mismatch" in decision.reasoning.lower()
         )
+
+
+class TestRadarrAnalyzer:
+    """Test ScoreAnalyzer in Radarr mode"""
+
+    @pytest.fixture
+    def radarr_analyzer(self, mock_radarr_config):
+        config = MagicMock()
+        config.get.side_effect = lambda key, default=None: {
+            "decisions.force_import_threshold": 10,
+            "trackers.private": mock_radarr_config["trackers"]["private"],
+            "trackers.public": mock_radarr_config["trackers"]["public"],
+        }.get(key, default)
+
+        sonarr_client = MagicMock()
+        sonarr_client.app_type = "radarr"
+        return ScoreAnalyzer(config, sonarr_client)
+
+    def test_radarr_app_type(self, radarr_analyzer):
+        """Test that Radarr analyzer has correct app_type"""
+        assert radarr_analyzer.app_type == "radarr"
+
+    def test_radarr_analyze_queue_item_extracts_movie(
+        self, radarr_analyzer, mock_radarr_queue_item
+    ):
+        """Test that Radarr analyzes movie field instead of episode"""
+        radarr_analyzer.sonarr_client.get_history_for_episode.return_value = []
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"hasFile": False}
+        radarr_analyzer.sonarr_client._make_request.return_value = mock_response
+
+        decision = radarr_analyzer.analyze_queue_item(mock_radarr_queue_item)
+
+        assert isinstance(decision, Decision)
+        # Should use movieId=50 for history lookup
+        radarr_analyzer.sonarr_client.get_history_for_episode.assert_called_once_with(
+            50
+        )
+
+    def test_radarr_matched_by_movie_id(self, radarr_analyzer):
+        """Test force import for 'matched to movie by id'"""
+        queue_item = {
+            "id": 1,
+            "downloadId": "test-download-123",
+            "movie": {"id": 50, "title": "Test Movie"},
+            "statusMessages": [{"messages": ["Release was matched to movie by ID"]}],
+        }
+
+        decision = radarr_analyzer.analyze_queue_item(queue_item)
+
+        assert decision.action == "force_import"
+        assert "Movie identified by ID" in decision.reasoning
+
+    def test_radarr_get_current_file_details(self, radarr_analyzer):
+        """Test Radarr uses /movie/{id} and movieFileId"""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"hasFile": True, "movieFileId": 42}
+        radarr_analyzer.sonarr_client._make_request.return_value = mock_response
+        radarr_analyzer.sonarr_client.get_episode_file.return_value = {
+            "customFormatScore": 90,
+            "customFormats": [{"name": "Remux"}],
+        }
+
+        score, formats = radarr_analyzer.get_current_file_details(50)
+
+        radarr_analyzer.sonarr_client._make_request.assert_called_once_with(
+            "GET", "/movie/50"
+        )
+        radarr_analyzer.sonarr_client.get_episode_file.assert_called_once_with(42)
+        assert score == 90
+        assert "Remux" in formats

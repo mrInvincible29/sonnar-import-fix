@@ -31,11 +31,12 @@ class SonarrImportMonitor:
             config: Configuration loader instance
         """
         self.config = config
+        self.app_type = config.get("app.type", "sonarr")
         self.dry_run = False  # Set by CLI args
         self.running = False
 
         # Initialize components
-        self.sonarr_client = SonarrClient(config)
+        self.sonarr_client = SonarrClient(config, app_type=self.app_type)
         self.analyzer = ScoreAnalyzer(config, self.sonarr_client)
 
         # Webhook server (initialized on demand)
@@ -56,7 +57,8 @@ class SonarrImportMonitor:
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
 
-        logger.info("Sonarr Import Monitor initialized")
+        app_label = "Radarr" if self.app_type == "radarr" else "Sonarr"
+        logger.debug(f"{app_label} Import Monitor initialized")
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully."""
@@ -74,30 +76,35 @@ class SonarrImportMonitor:
         logger.info("🧪 Testing configuration and connectivity...")
 
         try:
-            # Test Sonarr connection
+            app_label = "Radarr" if self.app_type == "radarr" else "Sonarr"
+            content_label = "movies" if self.app_type == "radarr" else "series"
+
+            # Test connection
             if not self.sonarr_client.test_connection():
-                logger.error("❌ Failed to connect to Sonarr")
+                logger.error(f"❌ Failed to connect to {app_label}")
                 return False
 
-            logger.info("✅ Sonarr connection successful")
+            logger.info(f"✅ {app_label} connection successful")
 
             # Test configuration loading
             try:
                 custom_formats = self.sonarr_client.fetch_custom_formats()
                 quality_profiles = self.sonarr_client.fetch_quality_profiles()
-                series_map = self.sonarr_client.build_series_profile_map()
+                content_map = self.sonarr_client.build_series_profile_map()
 
                 logger.info(f"✅ Loaded {len(custom_formats)} custom formats")
                 logger.info(f"✅ Loaded {len(quality_profiles)} quality profiles")
-                logger.info(f"✅ Built profile map for {len(series_map)} series")
+                logger.info(
+                    f"✅ Built profile map for {len(content_map)} {content_label}"
+                )
 
             except Exception as e:
-                logger.error(f"❌ Failed to load Sonarr configuration: {e}")
+                logger.error(f"❌ Failed to load {app_label} configuration: {e}")
                 return False
 
-            # Test webhook configuration if enabled
+            # Test webhook configuration if enabled (Sonarr only)
             webhook_enabled = self.config.get("webhook.enabled", True)
-            if webhook_enabled:
+            if webhook_enabled and self.app_type != "radarr":
                 webhook_secret = self.config.get("webhook.secret")
                 if webhook_secret:
                     logger.info("✅ Webhook authentication configured")
@@ -118,6 +125,10 @@ class SonarrImportMonitor:
         Returns:
             True if started successfully, False otherwise
         """
+        if self.app_type == "radarr":
+            logger.info("Webhook not supported for Radarr - polling only")
+            return False
+
         if self.webhook_server:
             logger.warning("Webhook server already running")
             return True
@@ -158,29 +169,21 @@ class SonarrImportMonitor:
         Returns:
             Statistics about processed items
         """
-        logger.info("🔍 Checking for stuck imports...")
+        logger.debug("Checking for stuck imports...")
 
-        # Use cached version for production, regular method for tests
-        from unittest.mock import MagicMock
-
-        if hasattr(self.sonarr_client, "cache") and not isinstance(
-            self.sonarr_client, MagicMock
-        ):
-            queue = self.sonarr_client.get_queue_cached()
-        else:
-            queue = self.sonarr_client.get_queue()
+        queue = self._get_queue_smart()
         if not queue:
-            logger.info("✨ Queue is empty")
+            logger.debug("Queue is empty")
             return {"processed": 0, "forced": 0, "removed": 0}
 
         # Identify stuck items
         stuck_items = self._identify_stuck_items(queue)
 
         if not stuck_items:
-            logger.info("✨ No stuck imports found")
+            logger.debug("No stuck imports found")
             return {"processed": 0, "forced": 0, "removed": 0}
 
-        logger.info(f"Found {len(stuck_items)} stuck imports to process")
+        logger.info(f"Found {len(stuck_items)} stuck import(s)")
 
         results = {"processed": 0, "forced": 0, "removed": 0}
 
@@ -226,6 +229,7 @@ class SonarrImportMonitor:
                             "exists",
                             "duplicate",
                             "matched to series by id",
+                            "matched to movie by id",
                         ]
                     ):
                         stuck_items.append(item)
@@ -267,23 +271,31 @@ class SonarrImportMonitor:
             elif decision.action == "keep":
                 success = self._execute_keep_action(queue_item)
                 if success:
-                    logger.info(f"   ⏸️ Kept in download client: {decision.reasoning}")
+                    logger.debug(f"   Kept in download client: {decision.reasoning}")
                     return "kept"
                 else:
                     return "error"
 
             elif decision.action == "wait":
-                logger.info(f"   ⏳ Waiting: {decision.reasoning}")
+                logger.debug(f"   Waiting: {decision.reasoning}")
                 return "kept"
 
             else:
-                logger.info(f"   📊 Monitoring: {decision.reasoning}")
+                logger.debug(f"   Monitoring: {decision.reasoning}")
                 return "monitored"
 
         except Exception as e:
             logger.error(f"Error processing queue item: {e}")
             self.stats["errors_encountered"] += 1
             return "error"
+
+    def _get_content_id(self, queue_item: Dict) -> Optional[int]:
+        """Extract content ID (series or movie) from a queue item."""
+        if self.app_type == "radarr":
+            content = queue_item.get("movie", {})
+        else:
+            content = queue_item.get("series", {})
+        return content.get("id") if content else None
 
     def _execute_force_import(self, queue_item: Dict) -> bool:
         """Execute force import action."""
@@ -293,36 +305,79 @@ class SonarrImportMonitor:
 
         download_id = queue_item.get("downloadId")
         quality = queue_item.get("quality")
+        output_path = queue_item.get("outputPath")
+        content_id = self._get_content_id(queue_item)
 
         if not download_id:
             logger.error("   Missing download ID for force import")
             return False
 
-        success, command_id = self.sonarr_client.force_import(download_id, quality)
+        success, command_id = self.sonarr_client.force_import(
+            download_id, quality, output_path=output_path, content_id=content_id
+        )
 
         if success:
-            logger.info("   ✅ Successfully forced import")
-
-            # Wait for command to process and then cleanup any stuck queue items
+            logger.info("   Forced import OK")
             if command_id:
-                logger.debug(
-                    f"   Waiting for import command {command_id} to process..."
+                self._verify_import_and_cleanup(
+                    download_id, queue_item.get("id"), command_id
                 )
-                time.sleep(8)  # Wait for Sonarr to process the import
-
-                # Attempt to clean up stuck queue items
-                logger.debug("   Checking for post-import queue cleanup...")
-                cleanup_success = self.sonarr_client.cleanup_post_import_queue_item(
-                    download_id
+        elif command_id == -1:
+            # No import candidates from any method - item is permanently unimportable
+            logger.warning(
+                "   No import candidates available - removing unimportable item from queue"
+            )
+            queue_id = queue_item.get("id")
+            if queue_id:
+                removed = self.sonarr_client.remove_from_queue(
+                    queue_id, remove_from_client=True, blocklist=False
                 )
-                if cleanup_success:
-                    logger.info("   🧹 Cleaned up stuck queue item after import")
+                if removed:
+                    logger.info("   Removed unimportable item")
+                    return True
                 else:
-                    logger.debug("   No queue cleanup needed")
+                    logger.error("   ❌ Failed to remove unimportable item from queue")
         else:
             logger.error("   ❌ Failed to force import")
 
         return success
+
+    def _is_queue_item_still_stuck(self, queue_id: int) -> bool:
+        """Check if a queue item is still in the queue with a stuck state."""
+        try:
+            queue = self.sonarr_client.get_queue()
+            for item in queue:
+                if item.get("id") == queue_id:
+                    state = item.get("trackedDownloadState", "")
+                    return state in ("importPending", "importBlocked")
+            return False  # Item no longer in queue - import worked
+        except Exception as e:
+            logger.debug(f"Error checking queue item status: {e}")
+            return False
+
+    def _verify_import_and_cleanup(
+        self, download_id: str, queue_id: Optional[int], command_id: int
+    ):
+        """Wait for import command to process and clean up stuck items."""
+        logger.debug(f"   Waiting for import command {command_id} to process...")
+        time.sleep(8)
+
+        logger.debug("   Checking for post-import queue cleanup...")
+        if self.sonarr_client.cleanup_post_import_queue_item(download_id):
+            logger.debug("   Cleaned up stuck queue item after import")
+            return
+
+        if queue_id and self._is_queue_item_still_stuck(queue_id):
+            logger.warning(
+                "   Import command accepted but item still stuck - removing from queue"
+            )
+            removed = self.sonarr_client.remove_from_queue(
+                queue_id, remove_from_client=True, blocklist=False
+            )
+            if removed:
+                logger.info("   Removed still-stuck item")
+            else:
+                logger.error("   ❌ Failed to remove still-stuck item")
 
     def _execute_removal(self, queue_item: Dict) -> bool:
         """Execute removal action."""
@@ -341,7 +396,7 @@ class SonarrImportMonitor:
         )
 
         if success:
-            logger.info("   ✅ Successfully removed from queue")
+            logger.debug("   Removed from queue")
         else:
             logger.error("   ❌ Failed to remove from queue")
 
@@ -366,9 +421,7 @@ class SonarrImportMonitor:
         )
 
         if success:
-            logger.info(
-                "   ✅ Successfully removed from Sonarr queue, kept in download client"
-            )
+            logger.debug("   Removed from queue, kept in download client")
         else:
             logger.error("   ❌ Failed to remove from Sonarr queue")
 
@@ -381,7 +434,7 @@ class SonarrImportMonitor:
         Returns:
             Number of problematic episodes found
         """
-        logger.info("🔍 Checking for repeated grab patterns...")
+        logger.debug("Checking for repeated grab patterns...")
 
         try:
             # Get recent history
@@ -397,13 +450,14 @@ class SonarrImportMonitor:
 
             records = response.json().get("records", [])
 
-            # Group by episode
+            # Group by content (episode or movie)
+            content_key = "movie" if self.app_type == "radarr" else "episode"
             episodes_with_grabs = defaultdict(list)
             for record in records:
                 if record.get("eventType") == "grabbed":
-                    episode_id = record.get("episode", {}).get("id")
-                    if episode_id:
-                        episodes_with_grabs[episode_id].append(record)
+                    content_id = record.get(content_key, {}).get("id")
+                    if content_id:
+                        episodes_with_grabs[content_id].append(record)
 
             # Check episodes with multiple grabs
             problem_episodes = 0
@@ -420,7 +474,7 @@ class SonarrImportMonitor:
                         self.check_episode_queue(ep_id)
 
             if problem_episodes == 0:
-                logger.info("✅ No repeated grab issues found")
+                logger.debug("No repeated grab issues found")
             else:
                 logger.warning(
                     f"Found {problem_episodes} episodes with repeated grab issues"
@@ -440,24 +494,19 @@ class SonarrImportMonitor:
             episode_id: Sonarr episode ID
         """
         try:
-            # Use cached version for production, regular method for tests
-            from unittest.mock import MagicMock
-
-            if hasattr(self.sonarr_client, "cache") and not isinstance(
-                self.sonarr_client, MagicMock
-            ):
-                queue = self.sonarr_client.get_queue_cached()
-            else:
-                queue = self.sonarr_client.get_queue()
+            queue = self._get_queue_smart()
+            content_key = "movie" if self.app_type == "radarr" else "episode"
 
             for item in queue:
-                episode = item.get("episode", {})
-                if episode.get("id") == episode_id:
-                    logger.info(f"🔍 Found episode {episode_id} in queue")
+                item_id = item.get(content_key, {}).get("id")
+                if item_id == episode_id:
+                    label = "movie" if self.app_type == "radarr" else "episode"
+                    logger.debug(f"Found {label} {episode_id} in queue")
                     self.process_queue_item(item)
                     return
 
-            logger.debug(f"Episode {episode_id} not found in current queue")
+            label = "Movie" if self.app_type == "radarr" else "Episode"
+            logger.debug(f"{label} {episode_id} not found in current queue")
 
         except Exception as e:
             logger.error(f"Error checking episode queue: {e}")
@@ -470,19 +519,11 @@ class SonarrImportMonitor:
             download_id: Sonarr download ID
         """
         try:
-            # Use cached version for production, regular method for tests
-            from unittest.mock import MagicMock
-
-            if hasattr(self.sonarr_client, "cache") and not isinstance(
-                self.sonarr_client, MagicMock
-            ):
-                queue = self.sonarr_client.get_queue_cached()
-            else:
-                queue = self.sonarr_client.get_queue()
+            queue = self._get_queue_smart()
 
             for item in queue:
                 if item.get("downloadId") == download_id:
-                    logger.info(f"🔍 Found download {download_id} in queue")
+                    logger.debug(f"Found download {download_id} in queue")
                     self.process_queue_item(item)
                     return
 
@@ -533,42 +574,78 @@ class SonarrImportMonitor:
             if current_formats:
                 logger.info(f"  Current Formats: {', '.join(current_formats)}")
 
-            # Check if in queue
-            # Use cached version for production, regular method for tests
-            from unittest.mock import MagicMock
-
-            if hasattr(self.sonarr_client, "cache") and not isinstance(
-                self.sonarr_client, MagicMock
-            ):
-                queue = self.sonarr_client.get_queue_cached()
-            else:
-                queue = self.sonarr_client.get_queue()
-            queue_item = None
-            for item in queue:
-                if item.get("episode", {}).get("id") == episode_id:
-                    queue_item = item
-                    break
-
-            if queue_item:
-                logger.info(f"\n📥 Episode is currently in queue")
-                decision = self.analyzer.analyze_queue_item(queue_item)
-                logger.info(f"\n🎯 DECISION: {decision.action.upper()}")
-                logger.info(f"   Reasoning: {decision.reasoning}")
-
-                if self.dry_run:
-                    logger.info(f"\n🔸 DRY RUN: No actions will be taken")
-            else:
-                logger.info(f"\n✨ Episode is not in queue")
-
-                # Show historical analysis
-                history = self.sonarr_client.get_history_for_episode(
-                    episode_id, limit=10
-                )
-                if history:
-                    self._show_history_analysis(history, episode_id, series["id"])
+            self._test_content_queue_and_history(episode_id, "episode", "Episode")
 
         except Exception as e:
             logger.error(f"Error testing episode: {e}")
+
+    def _get_queue_smart(self) -> List[Dict]:
+        """Get queue using cached version in production, uncached in tests."""
+        from unittest.mock import MagicMock
+
+        if hasattr(self.sonarr_client, "cache") and not isinstance(
+            self.sonarr_client, MagicMock
+        ):
+            return self.sonarr_client.get_queue_cached()
+        return self.sonarr_client.get_queue()
+
+    def _test_content_queue_and_history(
+        self, content_id: int, queue_key: str, label: str
+    ):
+        """Check queue and show history for test mode content."""
+        queue = self._get_queue_smart()
+        queue_item = None
+        for item in queue:
+            if item.get(queue_key, {}).get("id") == content_id:
+                queue_item = item
+                break
+
+        if queue_item:
+            logger.info(f"\n📥 {label} is currently in queue")
+            decision = self.analyzer.analyze_queue_item(queue_item)
+            logger.info(f"\n🎯 DECISION: {decision.action.upper()}")
+            logger.info(f"   Reasoning: {decision.reasoning}")
+            if self.dry_run:
+                logger.info("\n🔸 DRY RUN: No actions will be taken")
+        else:
+            logger.info(f"\n✨ {label} is not in queue")
+            history = self.sonarr_client.get_history_for_episode(content_id, limit=10)
+            if history:
+                self._show_history_analysis(history, content_id, content_id)
+
+    def test_specific_movie(self, movie_title: str):
+        """
+        Test analysis for a specific movie.
+
+        Args:
+            movie_title: Movie title to search for
+        """
+        logger.info(f"\n{'='*70}")
+        logger.info(f"🧪 TEST MODE: Analyzing movie '{movie_title}'")
+        logger.info(f"{'='*70}")
+
+        try:
+            movie = self.sonarr_client.get_series_by_title(movie_title)
+            if not movie:
+                logger.error(f"❌ Movie '{movie_title}' not found")
+                return
+
+            movie_id = movie["id"]
+            year = movie.get("year", "")
+            logger.info(f"✓ Found movie: {movie['title']} ({year}) (ID: {movie_id})")
+            logger.info(f"  Has File: {movie.get('hasFile', False)}")
+
+            current_score, current_formats = self.analyzer.get_current_file_details(
+                movie_id, movie_id
+            )
+            logger.info(f"  Current File Score: {current_score}")
+            if current_formats:
+                logger.info(f"  Current Formats: {', '.join(current_formats)}")
+
+            self._test_content_queue_and_history(movie_id, "movie", "Movie")
+
+        except Exception as e:
+            logger.error(f"Error testing movie: {e}")
 
     def _show_history_analysis(
         self, history: List[Dict], episode_id: int, series_id: int
@@ -656,7 +733,7 @@ class SonarrImportMonitor:
         mode = "DRY RUN" if self.dry_run else "LIVE"
         features = []
 
-        if enable_webhook:
+        if enable_webhook and self.app_type != "radarr":
             features.append("Webhook")
             if not self.start_webhook_server():
                 logger.error("Failed to start webhook server")
@@ -667,15 +744,15 @@ class SonarrImportMonitor:
 
         feature_str = f" [{', '.join(features)}]" if features else ""
 
-        logger.info(f"🚀 Starting Sonarr Import Monitor [{mode}]{feature_str}")
-        logger.info(f"   Server: {self.config.get('sonarr.url')}")
-        logger.info(f"   Check Interval: {interval}s")
+        app_label = "Radarr" if self.app_type == "radarr" else "Sonarr"
+        logger.info(f"🚀 Starting {app_label} Import Monitor [{mode}]{feature_str}")
+        prefix = "radarr" if self.app_type == "radarr" else "sonarr"
         logger.info(
-            f"   Force Import Threshold: {self.config.get('decisions.force_import_threshold')}"
+            f"   Server: {self.config.get(f'{prefix}.url')} | "
+            f"Interval: {interval}s | "
+            f"Threshold: {self.config.get('decisions.force_import_threshold')}"
+            f"{' | DRY RUN' if self.dry_run else ''}"
         )
-
-        if self.dry_run:
-            logger.info(f"   🔸 DRY RUN MODE - No changes will be made")
 
         self.running = True
         cycle_count = 0
@@ -683,9 +760,8 @@ class SonarrImportMonitor:
         try:
             while self.running:
                 cycle_count += 1
-                logger.info(f"\n{'='*60}")
-                logger.info(
-                    f"🔄 Check cycle {cycle_count} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                logger.debug(
+                    f"Cycle {cycle_count} at {datetime.now().strftime('%H:%M:%S')}"
                 )
 
                 try:
@@ -721,7 +797,7 @@ class SonarrImportMonitor:
 
     def run_once(self):
         """Run a single monitoring cycle."""
-        logger.info("🔄 Running single monitoring cycle...")
+        logger.debug("Running single monitoring cycle...")
 
         try:
             results = self.process_stuck_imports()
@@ -729,7 +805,7 @@ class SonarrImportMonitor:
             if self.config.get("monitoring.detect_repeated_grabs", True):
                 self.check_repeated_grabs()
 
-            logger.info("✅ Single cycle completed")
+            logger.debug("Single cycle completed")
             self._log_statistics()
 
             return True
@@ -742,17 +818,18 @@ class SonarrImportMonitor:
         """Log current statistics."""
         uptime = datetime.now() - self.stats["start_time"]
 
-        logger.info(f"\n📊 Statistics:")
-        logger.info(f"   Uptime: {uptime}")
-        logger.info(f"   Cycles completed: {self.stats['cycles_completed']}")
-        logger.info(f"   Items processed: {self.stats['items_processed']}")
-        logger.info(f"   Forced imports: {self.stats['forced_imports']}")
-        logger.info(f"   Items removed: {self.stats['items_removed']}")
-        logger.info(f"   Errors encountered: {self.stats['errors_encountered']}")
+        logger.info(
+            f"Stats: {uptime} uptime | "
+            f"{self.stats['cycles_completed']} cycles | "
+            f"{self.stats['items_processed']} processed | "
+            f"{self.stats['forced_imports']} imported | "
+            f"{self.stats['items_removed']} removed | "
+            f"{self.stats['errors_encountered']} errors"
+        )
 
     def shutdown(self):
         """Shutdown the monitor gracefully."""
-        logger.info("🛑 Shutting down Sonarr Import Monitor...")
+        logger.debug("Shutting down...")
 
         self.running = False
 
@@ -766,5 +843,5 @@ class SonarrImportMonitor:
         # Clear caches
         self.sonarr_client.clear_cache()
 
-        logger.info("✅ Shutdown complete")
+        logger.debug("Shutdown complete")
         self._log_statistics()

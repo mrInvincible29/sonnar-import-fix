@@ -8,6 +8,7 @@ by monitoring the queue, comparing grab vs import scores, and taking appropriate
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -53,7 +54,7 @@ Security:
 
 Environment Variables:
   SONARR_URL          - Sonarr server URL (required)
-  SONARR_API_KEY      - Sonarr API key (required) 
+  SONARR_API_KEY      - Sonarr API key (required)
   WEBHOOK_SECRET      - Webhook authentication secret
   WEBHOOK_PORT        - Webhook server port (default: 8090)
   FORCE_IMPORT_THRESHOLD - Score difference threshold (default: 10)
@@ -78,9 +79,11 @@ Environment Variables:
     mode_group.add_argument(
         "--test",
         "-t",
-        nargs=3,
-        metavar=("SERIES", "SEASON", "EPISODE"),
-        help='Test mode: analyze specific episode (e.g., --test "SAKAMOTO DAYS" 1 19)',
+        nargs="+",
+        metavar="ARG",
+        help="Test mode: analyze specific content. "
+        'Sonarr: --test "SERIES" SEASON EPISODE. '
+        'Radarr: --test "MOVIE TITLE"',
     )
 
     # Runtime options
@@ -111,6 +114,13 @@ Environment Variables:
         help="Test configuration and connectivity, then exit",
     )
 
+    parser.add_argument(
+        "--app-type",
+        choices=["sonarr", "radarr"],
+        default=None,
+        help="Application type: sonarr (default) or radarr",
+    )
+
     return parser
 
 
@@ -126,19 +136,25 @@ def validate_arguments(args) -> bool:
     """
     # Validate test arguments
     if args.test:
-        series_title, season, episode = args.test
-
-        try:
-            season = int(season)
-            episode = int(episode)
-
-            if season < 0 or episode < 0:
-                print("Error: Season and episode numbers must be positive")
+        app_type = args.app_type or os.environ.get("APP_TYPE", "sonarr")
+        if app_type == "radarr":
+            if len(args.test) < 1:
+                print("Error: Radarr --test requires at least a movie title")
                 return False
-
-        except ValueError:
-            print("Error: Season and episode must be valid integers")
-            return False
+        else:
+            if len(args.test) != 3:
+                print("Error: Sonarr --test requires 3 args: SERIES SEASON EPISODE")
+                return False
+            _, season, episode = args.test
+            try:
+                season = int(season)
+                episode = int(episode)
+                if season < 0 or episode < 0:
+                    print("Error: Season and episode numbers must be positive")
+                    return False
+            except ValueError:
+                print("Error: Season and episode must be valid integers")
+                return False
 
     # Validate config file path
     if args.config and not Path(args.config).exists():
@@ -153,6 +169,16 @@ def validate_arguments(args) -> bool:
     return True
 
 
+def _run_test_mode(monitor, config, test_args):
+    """Execute test mode for a specific episode or movie."""
+    if config.get("app.type") == "radarr":
+        movie_title = " ".join(test_args)
+        monitor.test_specific_movie(movie_title)
+    else:
+        series_title, season, episode = test_args
+        monitor.test_specific_episode(series_title, int(season), int(episode))
+
+
 def main():
     """Main entry point."""
 
@@ -165,8 +191,12 @@ def main():
         sys.exit(1)
 
     try:
+        # Apply --app-type override to env before loading config
+        if args.app_type:
+            os.environ["APP_TYPE"] = args.app_type
+
         # Load configuration
-        print("🔧 Loading configuration...")
+        # Load configuration
         config = ConfigLoader(config_path=args.config, env_file=args.env)
 
         # Setup logging
@@ -176,22 +206,12 @@ def main():
 
         logger = logging.getLogger(__name__)
 
-        # Log startup information
-        logger.info("🚀 Starting Sonarr Import Monitor v2.0.0")
-        logger.info(
-            f"   Configuration loaded from: {args.config or 'default locations'}"
-        )
-
-        # Show masked configuration for verification
-        masked_config = config.get_masked_config_for_logging()
-        logger.debug(f"Configuration: {masked_config}")
+        logger.debug(f"Config loaded from: {args.config or 'default locations'}")
+        logger.debug(f"Configuration: {config.get_masked_config_for_logging()}")
 
         # Initialize monitor
         monitor = SonarrImportMonitor(config)
         monitor.dry_run = args.dry_run
-
-        if args.dry_run:
-            logger.info("🔸 DRY RUN MODE - No changes will be made")
 
         # Test configuration if requested
         if args.test_config:
@@ -201,17 +221,13 @@ def main():
 
         # Execute based on mode
         if args.test:
-            # Test specific episode
-            series_title, season, episode = args.test
-            monitor.test_specific_episode(series_title, int(season), int(episode))
+            _run_test_mode(monitor, config, args.test)
 
         elif args.once:
-            # Run once and exit
             success = monitor.run_once()
             sys.exit(0 if success else 1)
 
         else:
-            # Continuous monitoring
             success = monitor.run_continuous(enable_webhook=args.webhook)
             sys.exit(0 if success else 1)
 

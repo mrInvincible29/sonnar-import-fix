@@ -429,7 +429,10 @@ class TestActionExecution:
 
         assert result is True
         monitor.sonarr_client.force_import.assert_called_once_with(
-            "abc123def456", mock_sonarr_queue_item["quality"]
+            "abc123def456",
+            mock_sonarr_queue_item["quality"],
+            output_path="/downloads/complete/tv/Test.Episode.S01E01",
+            content_id=10,
         )
 
     def test_execute_force_import_missing_data(self, monitor):
@@ -452,6 +455,80 @@ class TestActionExecution:
         assert result is True
         # Should not call actual API
         monitor.sonarr_client.force_import.assert_not_called()
+
+    def test_execute_force_import_unimportable_removes_from_queue(
+        self, monitor, mock_sonarr_queue_item
+    ):
+        """Test that unimportable items (command_id=-1) are removed from queue"""
+        monitor.sonarr_client.force_import.return_value = (False, -1)
+        monitor.sonarr_client.remove_from_queue.return_value = True
+
+        result = monitor._execute_force_import(mock_sonarr_queue_item)
+
+        assert result is True
+        monitor.sonarr_client.remove_from_queue.assert_called_once_with(
+            1, remove_from_client=True, blocklist=False
+        )
+
+    def test_execute_force_import_unimportable_removal_fails(
+        self, monitor, mock_sonarr_queue_item
+    ):
+        """Test unimportable item when queue removal also fails"""
+        monitor.sonarr_client.force_import.return_value = (False, -1)
+        monitor.sonarr_client.remove_from_queue.return_value = False
+
+        result = monitor._execute_force_import(mock_sonarr_queue_item)
+
+        assert result is False
+
+    def test_execute_force_import_passes_extra_params(
+        self, monitor, mock_sonarr_queue_item
+    ):
+        """Test that outputPath and seriesId are passed to force_import"""
+        monitor.sonarr_client.force_import.return_value = (True, 123)
+        monitor.sonarr_client.cleanup_post_import_queue_item.return_value = True
+
+        monitor._execute_force_import(mock_sonarr_queue_item)
+
+        monitor.sonarr_client.force_import.assert_called_once_with(
+            "abc123def456",
+            mock_sonarr_queue_item["quality"],
+            output_path="/downloads/complete/tv/Test.Episode.S01E01",
+            content_id=10,
+        )
+
+    def test_execute_force_import_removes_still_stuck_item(
+        self, monitor, mock_sonarr_queue_item
+    ):
+        """Test that items still stuck after import command are removed"""
+        monitor.sonarr_client.force_import.return_value = (True, 123)
+        monitor.sonarr_client.cleanup_post_import_queue_item.return_value = False
+        # Item is still in queue with importPending state
+        monitor.sonarr_client.get_queue.return_value = [
+            {"id": 1, "trackedDownloadState": "importPending"}
+        ]
+        monitor.sonarr_client.remove_from_queue.return_value = True
+
+        result = monitor._execute_force_import(mock_sonarr_queue_item)
+
+        assert result is True
+        monitor.sonarr_client.remove_from_queue.assert_called_once_with(
+            1, remove_from_client=True, blocklist=False
+        )
+
+    def test_execute_force_import_no_removal_if_import_worked(
+        self, monitor, mock_sonarr_queue_item
+    ):
+        """Test that items successfully imported are not removed"""
+        monitor.sonarr_client.force_import.return_value = (True, 123)
+        monitor.sonarr_client.cleanup_post_import_queue_item.return_value = False
+        # Item no longer in queue - import worked
+        monitor.sonarr_client.get_queue.return_value = []
+
+        result = monitor._execute_force_import(mock_sonarr_queue_item)
+
+        assert result is True
+        monitor.sonarr_client.remove_from_queue.assert_not_called()
 
     def test_execute_removal_success(self, monitor, mock_sonarr_queue_item):
         """Test successful removal execution"""
@@ -773,17 +850,15 @@ class TestStatistics:
 
         monitor._log_statistics()
 
-        # Verify logger was called with statistics
+        # Verify logger was called with statistics (single-line format)
         call_args = [call.args[0] for call in mock_logger.info.call_args_list]
 
-        # Check that all key statistics are logged
         logged_text = " ".join(call_args)
-        assert "Statistics:" in logged_text
-        assert "Cycles completed: 5" in logged_text
-        assert "Items processed: 10" in logged_text
-        assert "Forced imports: 3" in logged_text
-        assert "Items removed: 2" in logged_text
-        assert "Errors encountered: 1" in logged_text
+        assert "5 cycles" in logged_text
+        assert "10 processed" in logged_text
+        assert "3 imported" in logged_text
+        assert "2 removed" in logged_text
+        assert "1 errors" in logged_text
 
 
 class TestShutdown:
@@ -900,3 +975,84 @@ class TestCompleteWorkflow:
                     assert results == {"processed": 1, "forced": 1, "removed": 0}
                     assert monitor.stats["forced_imports"] == 1
                     # Note: items_processed is only updated in run_once(), not in process_stuck_imports()
+
+
+class TestRadarrMonitor:
+    """Test monitor in Radarr mode"""
+
+    @pytest.fixture
+    def radarr_monitor(self, mock_radarr_config):
+        config = MagicMock()
+        config.get.side_effect = lambda key, default=None: {
+            "app.type": "radarr",
+            "radarr.url": mock_radarr_config["radarr"]["url"],
+            "monitoring.interval": 60,
+            "monitoring.detect_repeated_grabs": True,
+            "decisions.force_import_threshold": 10,
+            "webhook.enabled": False,
+        }.get(key, default)
+
+        with patch("src.core.monitor.SonarrClient"), patch(
+            "src.core.monitor.ScoreAnalyzer"
+        ), patch("src.core.monitor.signal.signal"):
+            monitor = SonarrImportMonitor(config)
+
+        return monitor
+
+    def test_radarr_app_type(self, radarr_monitor):
+        """Test that Radarr monitor has correct app_type"""
+        assert radarr_monitor.app_type == "radarr"
+
+    def test_radarr_webhook_skipped(self, radarr_monitor):
+        """Test that webhook is not started for Radarr"""
+        result = radarr_monitor.start_webhook_server()
+        assert result is False
+
+    def test_radarr_force_import_extracts_movie_id(
+        self, radarr_monitor, mock_radarr_queue_item
+    ):
+        """Test that Radarr force import uses movie.id"""
+        radarr_monitor.sonarr_client.force_import.return_value = (True, 123)
+        radarr_monitor.sonarr_client.cleanup_post_import_queue_item.return_value = True
+
+        radarr_monitor._execute_force_import(mock_radarr_queue_item)
+
+        radarr_monitor.sonarr_client.force_import.assert_called_once_with(
+            "abc123def456",
+            mock_radarr_queue_item["quality"],
+            output_path="/downloads/complete/movies/Test.Movie.2024",
+            content_id=50,
+        )
+
+    def test_radarr_identify_stuck_matched_by_movie_id(self, radarr_monitor):
+        """Test detection of 'matched to movie by id' pattern"""
+        queue = [
+            {
+                "id": 1,
+                "statusMessages": [
+                    {"messages": ["Matched to movie by ID. Automatic import disabled"]}
+                ],
+            }
+        ]
+        stuck = radarr_monitor._identify_stuck_items(queue)
+        assert len(stuck) == 1
+
+    def test_radarr_test_specific_movie(self, radarr_monitor):
+        """Test test_specific_movie method"""
+        mock_movie = {
+            "id": 50,
+            "title": "The Matrix",
+            "year": 1999,
+            "hasFile": True,
+        }
+        radarr_monitor.sonarr_client.get_series_by_title.return_value = mock_movie
+        radarr_monitor.analyzer.get_current_file_details.return_value = (80, ["x265"])
+        radarr_monitor.sonarr_client.get_queue.return_value = []
+        radarr_monitor.sonarr_client.get_history_for_episode.return_value = []
+
+        # Should not raise
+        radarr_monitor.test_specific_movie("The Matrix")
+
+        radarr_monitor.sonarr_client.get_series_by_title.assert_called_once_with(
+            "The Matrix"
+        )

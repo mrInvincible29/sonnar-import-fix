@@ -32,8 +32,11 @@ class ConfigLoader:
 
     # Environment variable mappings to config paths
     ENV_MAPPINGS = {
+        "APP_TYPE": "app.type",
         "SONARR_URL": "sonarr.url",
         "SONARR_API_KEY": "sonarr.api_key",
+        "RADARR_URL": "radarr.url",
+        "RADARR_API_KEY": "radarr.api_key",
         "WEBHOOK_ENABLED": "webhook.enabled",
         "WEBHOOK_HOST": "webhook.host",
         "WEBHOOK_PORT": "webhook.port",
@@ -107,20 +110,20 @@ class ConfigLoader:
 
     def _convert_env_value(self, value: str) -> Any:
         """Convert environment variable string to appropriate type."""
-        # Handle boolean values
-        if value.lower() in ("true", "yes", "1", "on"):
-            return True
-        elif value.lower() in ("false", "no", "0", "off"):
-            return False
-
-        # Handle numeric values
-        if value.isdigit():
+        # Handle numeric values first (before booleans, since "0"/"1" are numbers)
+        if value.isdigit() or (value.startswith("-") and value[1:].isdigit()):
             return int(value)
 
         try:
             return float(value)
         except ValueError:
             pass
+
+        # Handle boolean values (words only, not "0"/"1")
+        if value.lower() in ("true", "yes", "on"):
+            return True
+        elif value.lower() in ("false", "no", "off"):
+            return False
 
         # Return as string
         return value
@@ -129,15 +132,25 @@ class ConfigLoader:
         """Auto-generate webhook secret if not provided."""
         webhook_secret = self.get("webhook.secret")
         if not webhook_secret:
-            # Generate a secure random secret
             generated_secret = secrets.token_urlsafe(32)
             self._set_nested_value("webhook.secret", generated_secret)
-            print(f"Auto-generated webhook secret: {generated_secret}")
-            print("Save this secret for configuring Sonarr webhook!")
+            # Only print for Sonarr (which uses webhooks)
+            if self.get("app.type", "sonarr") != "radarr":
+                print(f"Auto-generated webhook secret: {generated_secret}")
+                print("Save this secret for configuring Sonarr webhook!")
 
     def _validate_config(self):
-        """Validate required configuration values."""
-        required_settings = ["sonarr.url", "sonarr.api_key"]
+        """Validate required configuration values based on app type."""
+        app_type = self.get("app.type", "sonarr")
+
+        if app_type == "radarr":
+            required_settings = ["radarr.url", "radarr.api_key"]
+            key_label = "RADARR_API_KEY"
+            url_label = "RADARR_URL"
+        else:
+            required_settings = ["sonarr.url", "sonarr.api_key"]
+            key_label = "SONARR_API_KEY"
+            url_label = "SONARR_URL"
 
         missing = []
         for setting in required_settings:
@@ -152,18 +165,18 @@ class ConfigLoader:
             )
 
         # Validate API key is not a placeholder
-        api_key = self.get("sonarr.api_key")
+        api_key = self.get(required_settings[1])
         if api_key in ["your-api-key", "your-api-key-here", "changeme"]:
             raise ConfigurationError(
-                "SONARR_API_KEY appears to be a placeholder. "
-                "Please set your actual Sonarr API key."
+                f"{key_label} appears to be a placeholder. "
+                f"Please set your actual API key."
             )
 
         # Validate URL format
-        url = self.get("sonarr.url")
+        url = self.get(required_settings[0])
         if not url.startswith(("http://", "https://")):
             raise ConfigurationError(
-                f"SONARR_URL must start with http:// or https://, got: {url}"
+                f"{url_label} must start with http:// or https://, got: {url}"
             )
 
     def _create_masked_config(self) -> Dict[str, Any]:
@@ -234,9 +247,17 @@ class ConfigLoader:
 
 # Default configuration values
 DEFAULT_CONFIG = {
+    "app": {
+        "type": "sonarr",  # 'sonarr' or 'radarr'
+    },
     "sonarr": {
         "url": None,  # Must be provided
         "api_key": None,  # Must be provided
+        "timeout": 30,
+    },
+    "radarr": {
+        "url": None,  # Must be provided when app.type is radarr
+        "api_key": None,  # Must be provided when app.type is radarr
         "timeout": 30,
     },
     "monitoring": {

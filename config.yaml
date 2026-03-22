@@ -1,6 +1,15 @@
-# Sonarr Import Monitor Configuration
+# Sonarr/Radarr Import Monitor Configuration
+
+# Application type: 'sonarr' or 'radarr'
+app:
+  type: "sonarr"
 
 sonarr:
+  url: "http://REDACTED_URL"
+  api_key: "REDACTED_API_KEY"
+
+# Radarr settings (used when app.type is 'radarr')
+radarr:
   url: "http://REDACTED_URL"
   api_key: "REDACTED_API_KEY"
 

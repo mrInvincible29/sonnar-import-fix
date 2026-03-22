@@ -26,16 +26,19 @@ class SonarrClient:
     Sonarr API client with automatic retry and proper error handling.
     """
 
-    def __init__(self, config: ConfigLoader):
+    def __init__(self, config: ConfigLoader, app_type: str = None):
         """
-        Initialize Sonarr API client.
+        Initialize API client for Sonarr or Radarr.
 
         Args:
             config: Configuration loader instance
+            app_type: 'sonarr' or 'radarr' (defaults to config app.type)
         """
-        self.base_url = config.get("sonarr.url").rstrip("/")
-        self.api_key = config.get("sonarr.api_key")
-        self.timeout = config.get("sonarr.timeout", 30)
+        self.app_type = app_type or config.get("app.type", "sonarr")
+        prefix = "radarr" if self.app_type == "radarr" else "sonarr"
+        self.base_url = config.get(f"{prefix}.url").rstrip("/")
+        self.api_key = config.get(f"{prefix}.api_key")
+        self.timeout = config.get(f"{prefix}.timeout", 30)
 
         self.headers = {"X-Api-Key": self.api_key, "Content-Type": "application/json"}
 
@@ -60,7 +63,8 @@ class SonarrClient:
         self._quality_profiles_cache: Optional[Dict[int, Dict]] = None
         self._series_profile_map_cache: Optional[Dict[int, int]] = None
 
-        logger.info(f"Initialized Sonarr client for: {self.base_url}")
+        app_label = "Radarr" if self.app_type == "radarr" else "Sonarr"
+        logger.debug(f"Initialized {app_label} client for: {self.base_url}")
 
     def close(self):
         """Close the session and cleanup resources."""
@@ -139,7 +143,9 @@ class SonarrClient:
             response = self._make_request("GET", "/system/status")
             data = response.json()
 
-            logger.info(f"Connected to Sonarr {data.get('version', 'unknown version')}")
+            logger.debug(
+                f"Connected to Sonarr {data.get('version', 'unknown version')}"
+            )
             return True
 
         except Exception as e:
@@ -164,7 +170,7 @@ class SonarrClient:
             result = {cf["id"]: cf for cf in formats}
             self._custom_formats_cache = result
 
-            logger.info(f"Loaded {len(result)} custom formats")
+            logger.debug(f"Loaded {len(result)} custom formats")
             return result
 
         except Exception as e:
@@ -189,7 +195,7 @@ class SonarrClient:
             result = {profile["id"]: profile for profile in profiles}
             self._quality_profiles_cache = result
 
-            logger.info(f"Loaded {len(result)} quality profiles")
+            logger.debug(f"Loaded {len(result)} quality profiles")
             return result
 
         except Exception as e:
@@ -199,32 +205,35 @@ class SonarrClient:
     @retry(max_attempts=2, delay=2.0, exceptions=SonarrAPIError)
     def build_series_profile_map(self) -> Dict[int, int]:
         """
-        Build a map of series ID to quality profile ID.
+        Build a map of series/movie ID to quality profile ID.
 
         Returns:
-            Dictionary mapping series ID to quality profile ID
+            Dictionary mapping series/movie ID to quality profile ID
         """
         if self._series_profile_map_cache is not None:
             return self._series_profile_map_cache
 
+        endpoint = "/movie" if self.app_type == "radarr" else "/series"
+        label = "movie" if self.app_type == "radarr" else "series"
+
         try:
-            response = self._make_request("GET", "/series")
-            series_list = response.json()
+            response = self._make_request("GET", endpoint)
+            items = response.json()
 
             result = {}
-            for series in series_list:
-                series_id = series["id"]
-                profile_id = series.get("qualityProfileId")
+            for item in items:
+                item_id = item["id"]
+                profile_id = item.get("qualityProfileId")
                 if profile_id:
-                    result[series_id] = profile_id
+                    result[item_id] = profile_id
 
             self._series_profile_map_cache = result
 
-            logger.info(f"Built series profile map for {len(result)} series")
+            logger.debug(f"Built {label} profile map for {len(result)} {label}")
             return result
 
         except Exception as e:
-            logger.error(f"Failed to build series profile map: {e}")
+            logger.error(f"Failed to build {label} profile map: {e}")
             return {}
 
     def get_custom_format_scores(self, series_id: int) -> Dict[int, int]:
@@ -287,12 +296,19 @@ class SonarrClient:
         Returns:
             List of queue items
         """
-        params = {
-            "pageSize": 1000,
-            "includeUnknownSeriesItems": include_unknown,
-            "includeSeries": True,
-            "includeEpisode": True,
-        }
+        if self.app_type == "radarr":
+            params = {
+                "pageSize": 1000,
+                "includeUnknownMovieItems": include_unknown,
+                "includeMovie": True,
+            }
+        else:
+            params = {
+                "pageSize": 1000,
+                "includeUnknownSeriesItems": include_unknown,
+                "includeSeries": True,
+                "includeEpisode": True,
+            }
 
         try:
             response = self._make_request("GET", "/queue", params=params)
@@ -327,44 +343,58 @@ class SonarrClient:
     @retry(max_attempts=2, delay=1.0, exceptions=SonarrAPIError)
     def get_series_by_title(self, title: str) -> Optional[Dict]:
         """
-        Find series by title (case-insensitive partial match).
+        Find series/movie by title (case-insensitive partial match).
 
         Args:
-            title: Series title to search for
+            title: Series/movie title to search for
 
         Returns:
-            Series data if found, None otherwise
+            Series/movie data if found, None otherwise
         """
+        endpoint = "/movie" if self.app_type == "radarr" else "/series"
+        label = "movie" if self.app_type == "radarr" else "series"
+
         try:
-            response = self._make_request("GET", "/series")
-            series_list = response.json()
+            response = self._make_request("GET", endpoint)
+            items = response.json()
 
             title_lower = title.lower()
-            for series in series_list:
-                if title_lower in series["title"].lower():
-                    return series
+            for item in items:
+                if title_lower in item["title"].lower():
+                    return item
 
             return None
 
         except Exception as e:
-            logger.error(f"Failed to search for series '{title}': {e}")
+            logger.error(f"Failed to search for {label} '{title}': {e}")
             return None
 
     @retry(max_attempts=2, delay=1.0, exceptions=SonarrAPIError)
     def get_episode_info(
-        self, series_id: int, season: int, episode: int
+        self, series_id: int, season: int = None, episode: int = None
     ) -> Optional[Dict]:
         """
-        Get specific episode information.
+        Get specific episode or movie information.
+
+        For Sonarr: looks up episode by series_id + season + episode number.
+        For Radarr: looks up movie by ID (season/episode ignored).
 
         Args:
-            series_id: Sonarr series ID
-            season: Season number
-            episode: Episode number
+            series_id: Sonarr series ID or Radarr movie ID
+            season: Season number (Sonarr only)
+            episode: Episode number (Sonarr only)
 
         Returns:
-            Episode data if found, None otherwise
+            Episode/movie data if found, None otherwise
         """
+        if self.app_type == "radarr":
+            try:
+                response = self._make_request("GET", f"/movie/{series_id}")
+                return response.json()
+            except Exception as e:
+                logger.error(f"Failed to get movie {series_id}: {e}")
+                return None
+
         params = {"seriesId": series_id}
 
         try:
@@ -386,18 +416,19 @@ class SonarrClient:
     @retry(max_attempts=2, delay=1.0, exceptions=SonarrAPIError)
     def get_history_for_episode(self, episode_id: int, limit: int = 50) -> List[Dict]:
         """
-        Get history for specific episode.
+        Get history for specific episode or movie.
 
         Args:
-            episode_id: Sonarr episode ID
+            episode_id: Sonarr episode ID or Radarr movie ID
             limit: Maximum number of history entries to return
 
         Returns:
             List of history entries
         """
+        id_key = "movieId" if self.app_type == "radarr" else "episodeId"
         params = {
             "pageSize": limit,
-            "episodeId": episode_id,
+            id_key: episode_id,
             "sortKey": "date",
             "sortDirection": "descending",
         }
@@ -408,71 +439,128 @@ class SonarrClient:
             return data.get("records", [])
 
         except Exception as e:
-            logger.error(f"Failed to get history for episode {episode_id}: {e}")
+            label = "movie" if self.app_type == "radarr" else "episode"
+            logger.error(f"Failed to get history for {label} {episode_id}: {e}")
             return []
 
     @retry(max_attempts=2, delay=1.0, exceptions=SonarrAPIError)
-    def get_episode_file(self, episode_file_id: int) -> Optional[Dict]:
+    def get_episode_file(self, file_id: int) -> Optional[Dict]:
         """
-        Get episode file details.
+        Get episode/movie file details.
 
         Args:
-            episode_file_id: Sonarr episode file ID
+            file_id: Sonarr episode file ID or Radarr movie file ID
 
         Returns:
-            Episode file data if found, None otherwise
+            File data if found, None otherwise
         """
+        endpoint = "/moviefile" if self.app_type == "radarr" else "/episodefile"
+
         try:
-            response = self._make_request("GET", f"/episodefile/{episode_file_id}")
+            response = self._make_request("GET", f"{endpoint}/{file_id}")
             return response.json()
 
         except Exception as e:
-            logger.error(f"Failed to get episode file {episode_file_id}: {e}")
+            label = "movie" if self.app_type == "radarr" else "episode"
+            logger.error(f"Failed to get {label} file {file_id}: {e}")
             return None
+
+    def _get_manual_import_candidates(
+        self,
+        download_id: str,
+        output_path: str = None,
+        content_id: int = None,
+    ) -> List:
+        """
+        Get manual import candidates, trying downloadId first then folder fallback.
+
+        Args:
+            download_id: Download ID from queue
+            output_path: Download output path for folder fallback
+            content_id: Series ID (Sonarr) or movie ID (Radarr) for fallback
+
+        Returns:
+            List of import candidate items (empty if none found).
+        """
+        params = {"downloadId": download_id}
+        response = self._make_request("GET", "/manualimport", params=params)
+        import_items = response.json()
+
+        if not import_items and output_path:
+            logger.debug(f"Folder-based manual import fallback for: {output_path}")
+            fallback_params = {
+                "folder": output_path,
+                "filterExistingFiles": "false",
+            }
+            if content_id:
+                id_key = "movieId" if self.app_type == "radarr" else "seriesId"
+                fallback_params[id_key] = content_id
+            response = self._make_request(
+                "GET", "/manualimport", params=fallback_params
+            )
+            import_items = response.json()
+
+        return import_items
+
+    def _prepare_import_item(self, item: Dict, quality: Dict = None):
+        """Prepare a single import item with app-type-specific fields."""
+        if self.app_type == "radarr":
+            movie = item.get("movie", {})
+            movie_id = movie.get("id")
+            if movie_id:
+                item["movieId"] = movie_id
+        else:
+            episodes = item.get("episodes", [])
+            episode_ids = [ep.get("id") for ep in episodes if ep.get("id")]
+            if episode_ids:
+                item["episodeIds"] = episode_ids
+            series = item.get("series", {})
+            sid = series.get("id")
+            if sid:
+                item["seriesId"] = sid
+
+        if quality:
+            item["quality"] = quality
 
     @retry(max_attempts=2, delay=2.0, exceptions=SonarrAPIError)
     def force_import(
-        self, download_id: str, quality: Dict = None
+        self,
+        download_id: str,
+        quality: Dict = None,
+        output_path: str = None,
+        content_id: int = None,
     ) -> tuple[bool, Optional[int]]:
         """
         Force import of a download.
 
+        Tries downloadId-based lookup first, then falls back to folder-based
+        lookup using outputPath if available.
+
         Args:
             download_id: Download ID from queue
             quality: Quality information (optional)
+            output_path: Download output path for folder-based fallback (optional)
+            content_id: Series ID (Sonarr) or movie ID (Radarr) for fallback
 
         Returns:
-            Tuple of (success: bool, command_id: Optional[int])
+            Tuple of (success: bool, command_id: Optional[int]).
+            command_id is -1 when no import candidates found from any method
+            (permanently unimportable), vs None for transient API errors.
         """
         try:
-            # Get manual import candidates
-            params = {"downloadId": download_id}
-            response = self._make_request("GET", "/manualimport", params=params)
-            import_items = response.json()
+            import_items = self._get_manual_import_candidates(
+                download_id, output_path, content_id
+            )
 
             if not import_items:
                 logger.warning(
                     f"No manual import candidates found for download {download_id}"
                 )
-                return False, None
+                return False, -1
 
-            # Prepare import items
+            # Prepare import items based on app type
             for item in import_items:
-                # Extract episode IDs from the episodes array
-                episodes = item.get("episodes", [])
-                episode_ids = [ep.get("id") for ep in episodes if ep.get("id")]
-
-                if episode_ids:
-                    item["episodeIds"] = episode_ids
-
-                # Use series ID from the existing series object
-                series = item.get("series", {})
-                series_id = series.get("id")
-                if series_id:
-                    item["seriesId"] = series_id
-
-                if quality:
-                    item["quality"] = quality
+                self._prepare_import_item(item, quality)
 
             # Execute import using command API
             command_payload = {
@@ -486,8 +574,8 @@ class SonarrClient:
             if response.status_code == 201:
                 command_data = response.json()
                 command_id = command_data.get("id")
-                logger.info(
-                    f"Force import command queued for download {download_id} (Command ID: {command_id})"
+                logger.debug(
+                    f"Import command queued: download={download_id} cmd={command_id}"
                 )
                 return True, command_id
             else:
@@ -517,7 +605,7 @@ class SonarrClient:
 
         try:
             response = self._make_request("DELETE", f"/queue/{queue_id}", params=params)
-            logger.info(f"Successfully removed queue item {queue_id}")
+            logger.debug(f"Removed queue item {queue_id}")
             return True
 
         except Exception as e:
@@ -570,8 +658,8 @@ class SonarrClient:
                 if item.get("downloadId") == download_id:
                     if self.should_cleanup_queue_item(item):
                         queue_id = item.get("id")
-                        logger.info(
-                            f"Cleaning up stuck queue item {queue_id} after successful import"
+                        logger.debug(
+                            f"Cleaning up stuck queue item {queue_id} after import"
                         )
 
                         # Remove from queue but keep in download client
@@ -580,9 +668,7 @@ class SonarrClient:
                         )
 
                         if success:
-                            logger.info(
-                                "✅ Successfully cleaned up post-import queue item"
-                            )
+                            logger.debug("Cleaned up post-import queue item")
                         else:
                             logger.warning(
                                 "⚠️ Failed to clean up post-import queue item"
@@ -604,4 +690,4 @@ class SonarrClient:
         self._custom_formats_cache = None
         self._quality_profiles_cache = None
         self._series_profile_map_cache = None
-        logger.info("Cleared Sonarr API caches")
+        logger.debug("Cleared API caches")

@@ -582,13 +582,77 @@ class TestImportOperations:
             assert command_id == 123
 
     def test_force_import_no_candidates(self, client):
-        """Test force import with no candidates"""
+        """Test force import with no candidates returns unimportable sentinel"""
         with requests_mock.Mocker() as m:
             m.get("http://test-sonarr:8989/api/v3/manualimport", json=[])
 
             success, command_id = client.force_import("download123")
             assert success is False
-            assert command_id is None
+            assert command_id == -1
+
+    def test_force_import_folder_fallback_success(self, client):
+        """Test force import falls back to folder-based lookup"""
+        mock_import_items = [
+            {
+                "path": "/downloads/test.mkv",
+                "episodes": [{"id": 100}],
+                "series": {"id": 10},
+            }
+        ]
+
+        with requests_mock.Mocker() as m:
+            # First call (by downloadId) returns empty
+            # Second call (by folder) returns items
+            m.get(
+                "http://test-sonarr:8989/api/v3/manualimport",
+                [{"json": []}, {"json": mock_import_items}],
+            )
+            m.post(
+                "http://test-sonarr:8989/api/v3/command",
+                json={"name": "ManualImport", "id": 456},
+                status_code=201,
+            )
+
+            success, command_id = client.force_import(
+                "download123",
+                output_path="/downloads/complete/tv/Test.Episode",
+                content_id=10,
+            )
+            assert success is True
+            assert command_id == 456
+
+            # Verify two GET requests were made (qs keys are lowercased)
+            get_requests = [h for h in m.request_history if h.method == "GET"]
+            assert len(get_requests) == 2
+            assert "downloadid" in get_requests[0].qs
+            assert "folder" in get_requests[1].qs
+            assert get_requests[1].qs["filterexistingfiles"] == ["false"]
+            assert get_requests[1].qs["seriesid"] == ["10"]
+
+    def test_force_import_both_methods_empty(self, client):
+        """Test force import returns -1 when both methods find no candidates"""
+        with requests_mock.Mocker() as m:
+            m.get("http://test-sonarr:8989/api/v3/manualimport", json=[])
+
+            success, command_id = client.force_import(
+                "download123",
+                output_path="/downloads/complete/tv/Test.Episode",
+            )
+            assert success is False
+            assert command_id == -1
+
+    def test_force_import_no_output_path_skips_fallback(self, client):
+        """Test force import skips folder fallback when no output_path"""
+        with requests_mock.Mocker() as m:
+            m.get("http://test-sonarr:8989/api/v3/manualimport", json=[])
+
+            success, command_id = client.force_import("download123")
+            assert success is False
+            assert command_id == -1
+
+            # Only one GET request (no folder fallback)
+            get_requests = [h for h in m.request_history if h.method == "GET"]
+            assert len(get_requests) == 1
 
     def test_force_import_error(self, client):
         """Test force import error handling"""
@@ -780,3 +844,117 @@ class TestErrorHandling:
             request = m.request_history[0]
             assert "X-Api-Key" in request.headers
             assert request.headers["X-Api-Key"] == client.api_key
+
+
+class TestRadarrClient:
+    """Test SonarrClient in Radarr mode"""
+
+    @pytest.fixture
+    def radarr_client(self, mock_radarr_config):
+        """Create SonarrClient in Radarr mode"""
+        config = MagicMock()
+        config.get.side_effect = lambda key, default=None: {
+            "app.type": "radarr",
+            "radarr.url": mock_radarr_config["radarr"]["url"],
+            "radarr.api_key": mock_radarr_config["radarr"]["api_key"],
+            "radarr.timeout": 30,
+        }.get(key, default)
+        return SonarrClient(config, app_type="radarr")
+
+    def test_radarr_init(self, radarr_client):
+        """Test Radarr client initialization"""
+        assert radarr_client.app_type == "radarr"
+        assert radarr_client.base_url == "http://test-radarr:7878"
+
+    def test_radarr_get_queue_params(self, radarr_client):
+        """Test that Radarr queue uses movie-specific params"""
+        with requests_mock.Mocker() as m:
+            m.get(
+                "http://test-radarr:7878/api/v3/queue",
+                json={"records": []},
+            )
+            radarr_client.get_queue()
+
+            request = m.request_history[0]
+            assert "includeUnknownMovieItems" in request.url
+            assert "includeMovie" in request.url
+            assert "includeEpisode" not in request.url
+
+    def test_radarr_build_profile_map(self, radarr_client):
+        """Test that Radarr uses /movie endpoint for profile map"""
+        mock_movies = [
+            {"id": 1, "title": "Test Movie", "qualityProfileId": 5},
+        ]
+        with requests_mock.Mocker() as m:
+            m.get("http://test-radarr:7878/api/v3/movie", json=mock_movies)
+            result = radarr_client.build_series_profile_map()
+            assert result[1] == 5
+
+    def test_radarr_get_history_uses_movieid(self, radarr_client):
+        """Test that Radarr history uses movieId param"""
+        with requests_mock.Mocker() as m:
+            m.get(
+                "http://test-radarr:7878/api/v3/history",
+                json={"records": []},
+            )
+            radarr_client.get_history_for_episode(50)
+
+            request = m.request_history[0]
+            assert "movieId=50" in request.url
+            assert "episodeId" not in request.url
+
+    def test_radarr_get_episode_file_uses_moviefile(self, radarr_client):
+        """Test that Radarr uses /moviefile endpoint"""
+        mock_file = {"id": 10, "customFormatScore": 50}
+        with requests_mock.Mocker() as m:
+            m.get("http://test-radarr:7878/api/v3/moviefile/10", json=mock_file)
+            result = radarr_client.get_episode_file(10)
+            assert result["id"] == 10
+
+    def test_radarr_force_import_uses_movieid(self, radarr_client):
+        """Test that Radarr force import extracts movieId"""
+        mock_items = [
+            {
+                "path": "/downloads/test.mkv",
+                "movie": {"id": 50, "title": "Test Movie"},
+            }
+        ]
+        with requests_mock.Mocker() as m:
+            m.get("http://test-radarr:7878/api/v3/manualimport", json=mock_items)
+            m.post(
+                "http://test-radarr:7878/api/v3/command",
+                json={"name": "ManualImport", "id": 789},
+                status_code=201,
+            )
+            success, command_id = radarr_client.force_import("download456")
+            assert success is True
+            assert command_id == 789
+
+            # Verify movieId was set in the payload
+            post_request = [h for h in m.request_history if h.method == "POST"][0]
+            import json
+
+            payload = json.loads(post_request.body)
+            assert payload["files"][0]["movieId"] == 50
+            assert "episodeIds" not in payload["files"][0]
+
+    def test_radarr_get_series_by_title_uses_movie(self, radarr_client):
+        """Test that Radarr searches /movie endpoint"""
+        mock_movies = [
+            {"id": 1, "title": "The Matrix"},
+            {"id": 2, "title": "Inception"},
+        ]
+        with requests_mock.Mocker() as m:
+            m.get("http://test-radarr:7878/api/v3/movie", json=mock_movies)
+            result = radarr_client.get_series_by_title("matrix")
+            assert result is not None
+            assert result["title"] == "The Matrix"
+
+    def test_radarr_get_episode_info_uses_movie_id(self, radarr_client):
+        """Test that Radarr fetches /movie/{id} directly"""
+        mock_movie = {"id": 50, "title": "Test Movie", "hasFile": True}
+        with requests_mock.Mocker() as m:
+            m.get("http://test-radarr:7878/api/v3/movie/50", json=mock_movie)
+            result = radarr_client.get_episode_info(50)
+            assert result["id"] == 50
+            assert result["title"] == "Test Movie"

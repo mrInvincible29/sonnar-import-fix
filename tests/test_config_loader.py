@@ -420,13 +420,14 @@ class TestEnvironmentValueConversion:
                         ("true", True),
                         ("TRUE", True),
                         ("yes", True),
-                        ("1", True),
                         ("on", True),
                         ("false", False),
                         ("FALSE", False),
                         ("no", False),
-                        ("0", False),
                         ("off", False),
+                        # "0" and "1" are treated as integers, not booleans
+                        ("1", 1),
+                        ("0", 0),
                     ]
 
                     for input_val, expected in test_cases:
