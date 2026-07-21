@@ -670,6 +670,246 @@ class TestScoreAnalyzerIntegration:
         )
 
 
+class TestCrossContentMismatchAnalysis:
+    """Regression coverage for downloads grabbed against the wrong owner."""
+
+    @staticmethod
+    def _queue(download_id="B9DA0D66DAF9808DABD98D13FA4DFE0AAC4BCBCA"):
+        return {
+            "id": 534525973,
+            "downloadId": download_id,
+            "outputPath": "/downloads/Ghost.in.the.Shell.2026.S01E03",
+            "series": {"id": 316, "title": "THE GHOST IN THE SHELL"},
+            "episode": {
+                "id": 10782,
+                "seasonNumber": 1,
+                "episodeNumber": 3,
+            },
+            "statusMessages": [],
+        }
+
+    @staticmethod
+    def _wrong_history(download_id=None):
+        return [
+            {
+                "eventType": "grabbed",
+                "downloadId": download_id or "b9da0d66daf9808dabd98d13fa4dfe0aac4bcbca",
+                "seriesId": 52,
+                "episodeId": 1992,
+                "customFormatScore": 1404,
+                "customFormats": [{"name": "Wrong target score"}],
+                "data": {"indexer": "SeedPool"},
+            }
+        ]
+
+    @staticmethod
+    def _candidate(score=1404):
+        return {
+            "path": "/downloads/Ghost.in.the.Shell.2026.S01E03/episode.mkv",
+            "series": {"id": 316},
+            "episodes": [{"id": 10782}],
+            "customFormatScore": score,
+            "customFormats": [{"name": "Correct target score"}],
+        }
+
+    def _prepare(self, analyzer, score=1404, current_score=1404):
+        analyzer.sonarr_client.get_history_for_episode.return_value = []
+        analyzer.sonarr_client.get_history_for_download.return_value = (
+            self._wrong_history()
+        )
+        analyzer.sonarr_client.get_manual_import_candidates.return_value = [
+            self._candidate(score)
+        ]
+        return patch.object(
+            analyzer,
+            "_get_current_file_evidence",
+            return_value=(current_score, ["Current format"], None),
+        )
+
+    def test_ghost_in_the_shell_equal_score_clears_only_arr_queue(self, analyzer):
+        """The observed cross-series hash uses the correct candidate score."""
+        with self._prepare(analyzer):
+            decision = analyzer.analyze_queue_item(self._queue())
+
+        assert decision.action == "keep"
+        assert decision.grab_score == 1404
+        assert decision.current_score == 1404
+        assert decision.score_difference == 0
+        assert "cross-series mismatch" in decision.reasoning.lower()
+        assert "52" in decision.reasoning and "316" in decision.reasoning
+
+    def test_better_sonarr_candidate_forces_import(self, analyzer):
+        with self._prepare(analyzer, score=1414, current_score=1404):
+            decision = analyzer.analyze_queue_item(self._queue())
+
+        assert decision.action == "force_import"
+        assert decision.grab_score == 1414
+        assert decision.score_difference == 10
+        assert decision.grab_formats == ["Correct target score"]
+
+    def test_download_id_matching_is_case_insensitive(self, analyzer):
+        queue = self._queue(download_id="b9da0d66daf9808dabd98d13fa4dfe0aac4bcbca")
+        analyzer.sonarr_client.get_history_for_episode.return_value = (
+            self._wrong_history(download_id=queue["downloadId"].upper())
+        )
+        with patch.object(
+            analyzer, "_get_current_file_evidence", return_value=(1404, [], None)
+        ):
+            decision = analyzer.analyze_queue_item(queue)
+
+        assert decision.action == "wait"
+        analyzer.sonarr_client.get_history_for_download.assert_not_called()
+
+    def test_same_owner_global_history_is_normal_fallback(self, analyzer):
+        queue = self._queue()
+        analyzer.sonarr_client.get_history_for_episode.return_value = []
+        analyzer.sonarr_client.get_history_for_download.return_value = [
+            {
+                "eventType": "grabbed",
+                "downloadId": queue["downloadId"].lower(),
+                "seriesId": 316,
+                "episodeId": 99999,
+                "customFormatScore": 1414,
+                "customFormats": [{"name": "Season pack"}],
+                "data": {"indexer": "SeedPool"},
+            }
+        ]
+        with patch.object(
+            analyzer, "_get_current_file_evidence", return_value=(1404, [], None)
+        ):
+            decision = analyzer.analyze_queue_item(queue)
+
+        assert decision.action == "force_import"
+        assert "cross-series mismatch" not in decision.reasoning.lower()
+        analyzer.sonarr_client.get_manual_import_candidates.assert_not_called()
+
+    def test_multiple_matching_season_pack_candidates_are_exceptional(
+        self, analyzer, caplog
+    ):
+        analyzer.sonarr_client.get_history_for_episode.return_value = []
+        analyzer.sonarr_client.get_history_for_download.return_value = (
+            self._wrong_history()
+        )
+        analyzer.sonarr_client.get_manual_import_candidates.return_value = [
+            self._candidate(1414),
+            {**self._candidate(1420), "path": "/downloads/second.mkv"},
+        ]
+        with patch.object(
+            analyzer, "_get_current_file_evidence", return_value=(1404, [], None)
+        ), caplog.at_level("WARNING"):
+            decision = analyzer.analyze_queue_item(self._queue())
+
+        assert decision.action == "monitor"
+        assert "2 matching manual-import candidates" in decision.reasoning
+        assert "2 matching manual-import candidates" in caplog.text
+
+    def test_multiple_wrong_owner_history_rows_are_exceptional(self, analyzer, caplog):
+        analyzer.sonarr_client.get_history_for_episode.return_value = []
+        history = self._wrong_history()
+        history.append(
+            {
+                **history[0],
+                "episodeId": 1993,
+                "sourceTitle": "Wrong.Series.S01.Season.Pack",
+            }
+        )
+        analyzer.sonarr_client.get_history_for_download.return_value = history
+        with patch.object(
+            analyzer, "_get_current_file_evidence", return_value=(1404, [], None)
+        ), caplog.at_level("WARNING"):
+            decision = analyzer.analyze_queue_item(self._queue())
+
+        assert decision.action == "monitor"
+        assert "multiple grabbed history" in decision.reasoning.lower()
+        assert "season pack" in decision.reasoning.lower()
+
+    def test_null_candidate_owner_is_exceptional(self, analyzer, caplog):
+        analyzer.sonarr_client.get_history_for_episode.return_value = []
+        analyzer.sonarr_client.get_history_for_download.return_value = (
+            self._wrong_history()
+        )
+        analyzer.sonarr_client.get_manual_import_candidates.return_value = [
+            {**self._candidate(), "series": None}
+        ]
+        with patch.object(
+            analyzer, "_get_current_file_evidence", return_value=(1404, [], None)
+        ), caplog.at_level("WARNING"):
+            decision = analyzer.analyze_queue_item(self._queue())
+
+        assert decision.action == "monitor"
+        assert "0 matching manual-import candidates" in decision.reasoning
+
+    def test_current_file_api_error_is_exceptional(self, analyzer, caplog):
+        analyzer.sonarr_client.get_history_for_episode.return_value = []
+        analyzer.sonarr_client.get_history_for_download.return_value = (
+            self._wrong_history()
+        )
+        analyzer.sonarr_client.get_manual_import_candidates.return_value = [
+            self._candidate(2000)
+        ]
+        analyzer.sonarr_client._make_request.side_effect = RuntimeError(
+            "current file unavailable"
+        )
+
+        with caplog.at_level("WARNING"):
+            decision = analyzer.analyze_queue_item(self._queue())
+
+        assert decision.action == "monitor"
+        assert "current file lookup failed" in decision.reasoning.lower()
+        assert "current file unavailable" in caplog.text
+
+    @pytest.mark.parametrize("candidate_score", [None, "1404", True])
+    def test_nonnumeric_candidate_score_is_exceptional(self, analyzer, candidate_score):
+        with self._prepare(analyzer, score=candidate_score):
+            decision = analyzer.analyze_queue_item(self._queue())
+
+        assert decision.action == "monitor"
+        assert "nonnumeric" in decision.reasoning.lower()
+
+    def test_missing_download_history_is_exceptional(self, analyzer, caplog):
+        analyzer.sonarr_client.get_history_for_episode.return_value = []
+        analyzer.sonarr_client.get_history_for_download.return_value = []
+        with patch.object(
+            analyzer, "_get_current_file_evidence", return_value=(1404, [], None)
+        ), caplog.at_level("WARNING"):
+            decision = analyzer.analyze_queue_item(self._queue())
+
+        assert decision.action == "monitor"
+        assert "no grabbed history" in decision.reasoning.lower()
+        assert "No grabbed history" in caplog.text
+
+    def test_download_history_api_error_is_exceptional(self, analyzer, caplog):
+        analyzer.sonarr_client.get_history_for_episode.return_value = []
+        analyzer.sonarr_client.get_history_for_download.side_effect = RuntimeError(
+            "history unavailable"
+        )
+        with patch.object(
+            analyzer, "_get_current_file_evidence", return_value=(1404, [], None)
+        ), caplog.at_level("WARNING"):
+            decision = analyzer.analyze_queue_item(self._queue())
+
+        assert decision.action == "monitor"
+        assert "history lookup failed" in decision.reasoning.lower()
+        assert "history unavailable" in caplog.text
+
+    def test_manual_candidate_api_error_is_exceptional(self, analyzer, caplog):
+        analyzer.sonarr_client.get_history_for_episode.return_value = []
+        analyzer.sonarr_client.get_history_for_download.return_value = (
+            self._wrong_history()
+        )
+        analyzer.sonarr_client.get_manual_import_candidates.side_effect = RuntimeError(
+            "manual import unavailable"
+        )
+        with patch.object(
+            analyzer, "_get_current_file_evidence", return_value=(1404, [], None)
+        ), caplog.at_level("WARNING"):
+            decision = analyzer.analyze_queue_item(self._queue())
+
+        assert decision.action == "monitor"
+        assert "candidate lookup failed" in decision.reasoning.lower()
+        assert "manual import unavailable" in caplog.text
+
+
 class TestRadarrAnalyzer:
     """Test ScoreAnalyzer in Radarr mode"""
 
@@ -740,3 +980,75 @@ class TestRadarrAnalyzer:
         radarr_analyzer.sonarr_client.get_episode_file.assert_called_once_with(42)
         assert score == 90
         assert "Remux" in formats
+
+    @pytest.mark.parametrize(
+        ("candidate_score", "current_score", "expected_action"),
+        [(100, 100, "keep"), (90, 100, "keep"), (110, 100, "force_import")],
+    )
+    def test_radarr_cross_movie_mismatch_uses_correct_candidate_score(
+        self,
+        radarr_analyzer,
+        mock_radarr_queue_item,
+        candidate_score,
+        current_score,
+        expected_action,
+    ):
+        """Radarr mismatch decisions use the candidate for the queued movie."""
+        radarr_analyzer.sonarr_client.get_history_for_episode.return_value = []
+        radarr_analyzer.sonarr_client.get_history_for_download.return_value = [
+            {
+                "eventType": "grabbed",
+                "downloadId": mock_radarr_queue_item["downloadId"].upper(),
+                "movieId": 99,
+                "customFormatScore": 9999,
+                "customFormats": [{"name": "Wrong movie score"}],
+                "data": {"indexer": "SeedPool"},
+            }
+        ]
+        radarr_analyzer.sonarr_client.get_manual_import_candidates.return_value = [
+            {
+                "path": "/downloads/Test.Movie.2024/movie.mkv",
+                "movie": {"id": 50},
+                "customFormatScore": candidate_score,
+                "customFormats": [{"name": "Correct movie score"}],
+            }
+        ]
+
+        with patch.object(
+            radarr_analyzer,
+            "_get_current_file_evidence",
+            return_value=(current_score, ["Current format"], None),
+        ):
+            decision = radarr_analyzer.analyze_queue_item(mock_radarr_queue_item)
+
+        assert decision.action == expected_action
+        assert decision.grab_score == candidate_score
+        assert decision.grab_formats == ["Correct movie score"]
+        assert "cross-movie mismatch" in decision.reasoning.lower()
+
+    def test_conflicting_global_owner_history_is_exceptional(
+        self, radarr_analyzer, mock_radarr_queue_item, caplog
+    ):
+        radarr_analyzer.sonarr_client.get_history_for_episode.return_value = []
+        radarr_analyzer.sonarr_client.get_history_for_download.return_value = [
+            {
+                "eventType": "grabbed",
+                "downloadId": mock_radarr_queue_item["downloadId"],
+                "movieId": 98,
+            },
+            {
+                "eventType": "grabbed",
+                "downloadId": mock_radarr_queue_item["downloadId"],
+                "movieId": 99,
+            },
+        ]
+        with patch.object(
+            radarr_analyzer,
+            "_get_current_file_evidence",
+            return_value=(100, [], None),
+        ), caplog.at_level("WARNING"):
+            decision = radarr_analyzer.analyze_queue_item(mock_radarr_queue_item)
+
+        assert decision.action == "monitor"
+        assert "conflicting" in decision.reasoning.lower()
+        assert "conflicting" in caplog.text.lower()

@@ -336,6 +336,41 @@ class TestQueueItemProcessing:
                     assert monitor_with_mocks.stats["forced_imports"] == 1
                     mock_execute.assert_called_once_with(mock_sonarr_queue_item)
 
+    def test_process_validated_mismatch_uses_the_selected_candidate(
+        self, monitor_with_mocks, mock_sonarr_queue_item
+    ):
+        candidate = {
+            "path": "/downloads/correct.mkv",
+            "series": {"id": 10},
+            "episodes": [{"id": 100}],
+            "customFormatScore": 110,
+        }
+        decision = Decision(
+            action="force_import",
+            grab_score=110,
+            current_score=100,
+            score_difference=10,
+            reasoning="Validated cross-series candidate",
+            grab_formats=[],
+            current_formats=[],
+            missing_formats=[],
+            extra_formats=[],
+            is_private_tracker=False,
+            validated_import_candidate=candidate,
+        )
+        with patch.object(
+            monitor_with_mocks, "analyzer"
+        ) as mock_analyzer, patch.object(
+            monitor_with_mocks, "_execute_force_import", return_value=True
+        ) as mock_execute:
+            mock_analyzer.analyze_queue_item.return_value = decision
+
+            assert (
+                monitor_with_mocks.process_queue_item(mock_sonarr_queue_item)
+                == "forced_import"
+            )
+            mock_execute.assert_called_once_with(mock_sonarr_queue_item, candidate)
+
     def test_process_queue_item_remove(
         self, monitor_with_mocks, mock_sonarr_queue_item
     ):
@@ -383,13 +418,17 @@ class TestQueueItemProcessing:
             is_private_tracker=True,
         )
 
-        with patch.object(monitor_with_mocks, "analyzer") as mock_analyzer:
+        with patch.object(
+            monitor_with_mocks, "analyzer"
+        ) as mock_analyzer, patch.object(
+            monitor_with_mocks, "_execute_keep_action", return_value=True
+        ) as mock_execute:
             mock_analyzer.analyze_queue_item.return_value = decision
 
             result = monitor_with_mocks.process_queue_item(mock_sonarr_queue_item)
 
             assert result == "kept"
-            # Should not call execution methods for keep action
+            mock_execute.assert_called_once_with(mock_sonarr_queue_item)
 
     def test_process_queue_item_error(self, monitor_with_mocks, mock_sonarr_queue_item):
         """Test processing queue item with error"""
@@ -433,6 +472,49 @@ class TestActionExecution:
             mock_sonarr_queue_item["quality"],
             output_path="/downloads/complete/tv/Test.Episode.S01E01",
             content_id=10,
+        )
+
+    def test_execute_force_import_uses_validated_candidate_without_requery(
+        self, monitor, mock_sonarr_queue_item
+    ):
+        candidate = {
+            "path": "/downloads/correct.mkv",
+            "series": {"id": 10},
+            "episodes": [{"id": 100}],
+        }
+        monitor.sonarr_client.force_import_candidate.return_value = (True, None)
+
+        result = monitor._execute_force_import(mock_sonarr_queue_item, candidate)
+
+        assert result is True
+        monitor.sonarr_client.force_import_candidate.assert_called_once_with(
+            candidate, mock_sonarr_queue_item["quality"]
+        )
+        monitor.sonarr_client.force_import.assert_not_called()
+        monitor.sonarr_client.remove_from_queue.assert_not_called()
+
+    def test_validated_force_import_stuck_cleanup_keeps_download_client(
+        self, monitor, mock_sonarr_queue_item
+    ):
+        """A validated cross-content import must never remove its torrent."""
+        candidate = {
+            "path": "/downloads/correct.mkv",
+            "series": {"id": 10},
+            "episodes": [{"id": 100}],
+        }
+        monitor.sonarr_client.force_import_candidate.return_value = (True, 123)
+        monitor.sonarr_client.cleanup_post_import_queue_item.return_value = False
+        monitor.sonarr_client.get_queue.return_value = [
+            {"id": 1, "trackedDownloadState": "importPending"}
+        ]
+        monitor.sonarr_client.remove_from_queue.return_value = True
+
+        with patch("src.core.monitor.time.sleep"):
+            result = monitor._execute_force_import(mock_sonarr_queue_item, candidate)
+
+        assert result is True
+        monitor.sonarr_client.remove_from_queue.assert_called_once_with(
+            1, remove_from_client=False, blocklist=False
         )
 
     def test_execute_force_import_missing_data(self, monitor):
@@ -556,6 +638,17 @@ class TestActionExecution:
 
         assert result is True
         monitor.sonarr_client.remove_from_queue.assert_not_called()
+
+    def test_execute_keep_removes_only_arr_queue_entry(
+        self, monitor, mock_sonarr_queue_item
+    ):
+        """Keep means ignore the Arr queue item without touching qBittorrent."""
+        monitor.sonarr_client.remove_from_queue.return_value = True
+
+        assert monitor._execute_keep_action(mock_sonarr_queue_item) is True
+        monitor.sonarr_client.remove_from_queue.assert_called_once_with(
+            1, remove_from_client=False, blocklist=False
+        )
 
 
 class TestRepeatedGrabDetection:

@@ -250,10 +250,16 @@ class SonarrImportMonitor:
         try:
             # Analyze the item
             decision = self.analyzer.analyze_queue_item(queue_item)
+            self._log_stuck_item_decision(queue_item, decision)
 
             # Execute the decision
             if decision.action == "force_import":
-                success = self._execute_force_import(queue_item)
+                if decision.validated_import_candidate is None:
+                    success = self._execute_force_import(queue_item)
+                else:
+                    success = self._execute_force_import(
+                        queue_item, decision.validated_import_candidate
+                    )
                 if success:
                     self.stats["forced_imports"] += 1
                     return "forced_import"
@@ -271,23 +277,46 @@ class SonarrImportMonitor:
             elif decision.action == "keep":
                 success = self._execute_keep_action(queue_item)
                 if success:
-                    logger.debug(f"   Kept in download client: {decision.reasoning}")
+                    logger.info(f"   Kept in download client: {decision.reasoning}")
                     return "kept"
                 else:
                     return "error"
 
             elif decision.action == "wait":
-                logger.debug(f"   Waiting: {decision.reasoning}")
+                logger.info(f"   Waiting: {decision.reasoning}")
                 return "kept"
 
             else:
-                logger.debug(f"   Monitoring: {decision.reasoning}")
+                logger.warning(f"   Monitoring: {decision.reasoning}")
                 return "monitored"
 
         except Exception as e:
             logger.error(f"Error processing queue item: {e}")
             self.stats["errors_encountered"] += 1
             return "error"
+
+    def _log_stuck_item_decision(self, queue_item: Dict, decision) -> None:
+        """Emit one visible result line for every stuck queue item."""
+        queue_id = queue_item.get("id")
+        download_id = queue_item.get("downloadId")
+        if self.app_type == "radarr":
+            movie_id = queue_item.get("movie", {}).get("id")
+            target = f"movieId={movie_id}"
+        else:
+            series_id = queue_item.get("series", {}).get("id")
+            episode_id = queue_item.get("episode", {}).get("id")
+            target = f"seriesId={series_id} episodeId={episode_id}"
+
+        message = (
+            f"Stuck item result: queueId={queue_id} downloadId={download_id} "
+            f"{target} grabScore={decision.grab_score} "
+            f"currentScore={decision.current_score} action={decision.action} "
+            f"reason={decision.reasoning}"
+        )
+        if decision.action == "monitor":
+            logger.warning(message)
+        else:
+            logger.info(message)
 
     def _get_content_id(self, queue_item: Dict) -> Optional[int]:
         """Extract content ID (series or movie) from a queue item."""
@@ -297,7 +326,9 @@ class SonarrImportMonitor:
             content = queue_item.get("series", {})
         return content.get("id") if content else None
 
-    def _execute_force_import(self, queue_item: Dict) -> bool:
+    def _execute_force_import(
+        self, queue_item: Dict, validated_candidate: Optional[Dict] = None
+    ) -> bool:
         """Execute force import action."""
         if self.dry_run:
             logger.info("   🔸 DRY RUN: Would force import")
@@ -312,15 +343,27 @@ class SonarrImportMonitor:
             logger.error("   Missing download ID for force import")
             return False
 
-        success, command_id = self.sonarr_client.force_import(
-            download_id, quality, output_path=output_path, content_id=content_id
-        )
+        if validated_candidate is None:
+            success, command_id = self.sonarr_client.force_import(
+                download_id,
+                quality,
+                output_path=output_path,
+                content_id=content_id,
+            )
+        else:
+            success, command_id = self.sonarr_client.force_import_candidate(
+                validated_candidate,
+                quality,
+            )
 
         if success:
             logger.info("   Forced import OK")
             if command_id:
                 self._verify_import_and_cleanup(
-                    download_id, queue_item.get("id"), command_id
+                    download_id,
+                    queue_item.get("id"),
+                    command_id,
+                    remove_from_client_on_stuck=validated_candidate is None,
                 )
         elif command_id == -1:
             # No import candidates from any method - item is permanently unimportable
@@ -356,7 +399,11 @@ class SonarrImportMonitor:
             return False
 
     def _verify_import_and_cleanup(
-        self, download_id: str, queue_id: Optional[int], command_id: int
+        self,
+        download_id: str,
+        queue_id: Optional[int],
+        command_id: int,
+        remove_from_client_on_stuck: bool = True,
     ):
         """Wait for import command to process and clean up stuck items."""
         logger.debug(f"   Waiting for import command {command_id} to process...")
@@ -368,11 +415,20 @@ class SonarrImportMonitor:
             return
 
         if queue_id and self._is_queue_item_still_stuck(queue_id):
-            logger.warning(
-                "   Import command accepted but item still stuck - removing from queue"
-            )
+            if remove_from_client_on_stuck:
+                logger.warning(
+                    "   Import command accepted but item still stuck - removing "
+                    "from queue and download client"
+                )
+            else:
+                logger.warning(
+                    "   Validated cross-content import command accepted but item "
+                    "still stuck - queue-only cleanup; download remains in client"
+                )
             removed = self.sonarr_client.remove_from_queue(
-                queue_id, remove_from_client=True, blocklist=False
+                queue_id,
+                remove_from_client=remove_from_client_on_stuck,
+                blocklist=False,
             )
             if removed:
                 logger.info("   Removed still-stuck item")
@@ -421,7 +477,7 @@ class SonarrImportMonitor:
         )
 
         if success:
-            logger.debug("   Removed from queue, kept in download client")
+            logger.info("   Removed from queue, kept in download client")
         else:
             logger.error("   ❌ Failed to remove from Sonarr queue")
 

@@ -3,6 +3,7 @@ Sonarr API client with retry logic and proper error handling.
 """
 
 import logging
+from copy import deepcopy
 from typing import Dict, List, Optional
 from urllib.parse import urljoin
 
@@ -444,6 +445,20 @@ class SonarrClient:
             return []
 
     @retry(max_attempts=2, delay=1.0, exceptions=SonarrAPIError)
+    def get_history_for_download(self, download_id: str, limit: int = 50) -> List[Dict]:
+        """Get global Arr history filtered by a download client ID."""
+        params = {
+            "pageSize": limit,
+            "downloadId": download_id,
+            "sortKey": "date",
+            "sortDirection": "descending",
+        }
+
+        response = self._make_request("GET", "/history", params=params)
+        data = response.json()
+        return data.get("records", [])
+
+    @retry(max_attempts=2, delay=1.0, exceptions=SonarrAPIError)
     def get_episode_file(self, file_id: int) -> Optional[Dict]:
         """
         Get episode/movie file details.
@@ -465,7 +480,7 @@ class SonarrClient:
             logger.error(f"Failed to get {label} file {file_id}: {e}")
             return None
 
-    def _get_manual_import_candidates(
+    def get_manual_import_candidates(
         self,
         download_id: str,
         output_path: str = None,
@@ -522,6 +537,42 @@ class SonarrClient:
         if quality:
             item["quality"] = quality
 
+    def _submit_manual_import_items(
+        self, import_items: List[Dict], quality: Dict, description: str
+    ) -> tuple[bool, Optional[int]]:
+        """Submit an already selected set of manual-import items."""
+        for item in import_items:
+            self._prepare_import_item(item, quality)
+
+        command_payload = {
+            "name": "ManualImport",
+            "files": import_items,
+            "importMode": "move",
+        }
+        response = self._make_request("POST", "/command", json=command_payload)
+
+        if response.status_code == 201:
+            command_id = response.json().get("id")
+            logger.debug(
+                f"Import command queued: target={description} cmd={command_id}"
+            )
+            return True, command_id
+
+        logger.warning(f"Force import command returned {response.status_code}")
+        return False, None
+
+    def force_import_candidate(
+        self, candidate: Dict, quality: Dict = None
+    ) -> tuple[bool, Optional[int]]:
+        """Force import one candidate already validated by the analyzer."""
+        try:
+            import_item = deepcopy(candidate)
+            description = import_item.get("path", "validated candidate")
+            return self._submit_manual_import_items([import_item], quality, description)
+        except Exception as e:
+            logger.error(f"Failed to force import validated candidate: {e}")
+            return False, None
+
     @retry(max_attempts=2, delay=2.0, exceptions=SonarrAPIError)
     def force_import(
         self,
@@ -548,7 +599,7 @@ class SonarrClient:
             (permanently unimportable), vs None for transient API errors.
         """
         try:
-            import_items = self._get_manual_import_candidates(
+            import_items = self.get_manual_import_candidates(
                 download_id, output_path, content_id
             )
 
@@ -558,29 +609,7 @@ class SonarrClient:
                 )
                 return False, -1
 
-            # Prepare import items based on app type
-            for item in import_items:
-                self._prepare_import_item(item, quality)
-
-            # Execute import using command API
-            command_payload = {
-                "name": "ManualImport",
-                "files": import_items,
-                "importMode": "move",
-            }
-
-            response = self._make_request("POST", "/command", json=command_payload)
-
-            if response.status_code == 201:
-                command_data = response.json()
-                command_id = command_data.get("id")
-                logger.debug(
-                    f"Import command queued: download={download_id} cmd={command_id}"
-                )
-                return True, command_id
-            else:
-                logger.warning(f"Force import command returned {response.status_code}")
-                return False, None
+            return self._submit_manual_import_items(import_items, quality, download_id)
 
         except Exception as e:
             logger.error(f"Failed to force import {download_id}: {e}")
@@ -655,7 +684,11 @@ class SonarrClient:
             queue = self.get_queue()
 
             for item in queue:
-                if item.get("downloadId") == download_id:
+                item_download_id = item.get("downloadId")
+                if (
+                    item_download_id
+                    and str(item_download_id).casefold() == str(download_id).casefold()
+                ):
                     if self.should_cleanup_queue_item(item):
                         queue_id = item.get("id")
                         logger.debug(

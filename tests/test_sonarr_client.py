@@ -9,6 +9,7 @@ import requests
 import requests_mock
 
 from src.api.sonarr_client import SonarrAPIError, SonarrClient
+from src.utils.decorators import RetryError
 
 
 class TestSonarrClient:
@@ -421,6 +422,38 @@ class TestHistory:
             result = client.get_history_for_episode(100)
             assert result == []
 
+    def test_get_history_for_download_filters_and_encodes_id(
+        self, client, mock_sonarr_history_item
+    ):
+        """Download history uses the Arr downloadId filter and URL encoding."""
+        download_id = "ABC/123+mixed="
+        with requests_mock.Mocker() as m:
+            m.get(
+                "http://test-sonarr:8989/api/v3/history",
+                json={"records": [mock_sonarr_history_item]},
+            )
+
+            result = client.get_history_for_download(download_id, limit=25)
+
+            assert result == [mock_sonarr_history_item]
+            request = m.request_history[0]
+            assert request.qs["downloadid"] == [download_id.lower()]
+            assert request.qs["pagesize"] == ["25"]
+            assert request.qs["sortkey"] == ["date"]
+            assert request.qs["sortdirection"] == ["descending"]
+            assert "%2F" in request.url and "%2B" in request.url
+
+    def test_get_history_for_download_error(self, client):
+        """Download history API failures remain distinguishable from no records."""
+        with requests_mock.Mocker() as m:
+            m.get(
+                "http://test-sonarr:8989/api/v3/history",
+                exc=requests.ConnectionError,
+            )
+
+            with pytest.raises(RetryError):
+                client.get_history_for_download("download123")
+
 
 class TestSeriesOperations:
     """Test series related methods"""
@@ -580,6 +613,123 @@ class TestImportOperations:
             success, command_id = client.force_import("download123")
             assert success is True
             assert command_id == 123
+
+    def test_force_import_candidate_uses_validated_sonarr_target(self, client):
+        """A validated mismatch candidate is submitted without another lookup."""
+        candidate = {
+            "path": "/downloads/correct.mkv",
+            "series": {"id": 316},
+            "episodes": [{"id": 10782}],
+        }
+        with requests_mock.Mocker() as m:
+            m.post(
+                "http://test-sonarr:8989/api/v3/command",
+                json={"id": 123},
+                status_code=201,
+            )
+
+            success, _ = client.force_import_candidate(candidate)
+
+            assert success is True
+            import json
+
+            payload = json.loads(m.request_history[-1].body)
+            assert [item["path"] for item in payload["files"]] == [
+                "/downloads/correct.mkv"
+            ]
+            assert payload["files"][0]["seriesId"] == 316
+            assert payload["files"][0]["episodeIds"] == [10782]
+            assert all(request.method != "GET" for request in m.request_history)
+
+    def test_force_import_preserves_all_season_pack_candidates(self, client):
+        """Ordinary force imports retain the existing season-pack behavior."""
+        items = [
+            {
+                "path": "/downloads/episode1.mkv",
+                "series": {"id": 10},
+                "episodes": [{"id": 100}],
+            },
+            {
+                "path": "/downloads/episode2.mkv",
+                "series": {"id": 10},
+                "episodes": [{"id": 101}],
+            },
+        ]
+        with requests_mock.Mocker() as m:
+            m.get("http://test-sonarr:8989/api/v3/manualimport", json=items)
+            m.post(
+                "http://test-sonarr:8989/api/v3/command",
+                json={"id": 124},
+                status_code=201,
+            )
+
+            success, _ = client.force_import("season-pack", content_id=10)
+
+            assert success is True
+            import json
+
+            payload = json.loads(m.request_history[-1].body)
+            assert [item["path"] for item in payload["files"]] == [
+                "/downloads/episode1.mkv",
+                "/downloads/episode2.mkv",
+            ]
+
+    def test_get_manual_import_candidates_download_id_shape(self, client):
+        """Expose Sonarr manual-import candidates without mutating them."""
+        mock_items = [
+            {
+                "path": "/downloads/test.mkv",
+                "series": {"id": 10},
+                "episodes": [{"id": 100}],
+                "customFormatScore": 1404,
+            }
+        ]
+        with requests_mock.Mocker() as m:
+            m.get("http://test-sonarr:8989/api/v3/manualimport", json=mock_items)
+
+            result = client.get_manual_import_candidates("ABC/123+")
+
+            assert result == mock_items
+            request = m.request_history[0]
+            assert request.qs["downloadid"] == ["abc/123+"]
+            assert "%2F" in request.url and "%2B" in request.url
+            assert "episodeIds" not in result[0]
+
+    def test_get_manual_import_candidates_folder_fallback_params(self, client):
+        """Public candidate retrieval retains the folder fallback behavior."""
+        mock_items = [
+            {
+                "path": "/downloads/test.mkv",
+                "series": {"id": 10},
+                "episodes": [{"id": 100}],
+            }
+        ]
+        with requests_mock.Mocker() as m:
+            m.get(
+                "http://test-sonarr:8989/api/v3/manualimport",
+                [{"json": []}, {"json": mock_items}],
+            )
+
+            result = client.get_manual_import_candidates(
+                "download123", "/downloads/Series Name", 10
+            )
+
+            assert result == mock_items
+            fallback = m.request_history[1]
+            assert fallback.qs["folder"] == ["/downloads/series name"]
+            assert fallback.qs["filterexistingfiles"] == ["false"]
+            assert fallback.qs["seriesid"] == ["10"]
+
+    def test_get_manual_import_candidates_api_error(self, client):
+        """Candidate API failures remain distinguishable from empty results."""
+        with requests_mock.Mocker() as m:
+            m.get(
+                "http://test-sonarr:8989/api/v3/manualimport",
+                exc=requests.ConnectionError,
+            )
+
+            with pytest.raises(SonarrAPIError):
+                client.get_manual_import_candidates("download123")
 
     def test_force_import_no_candidates(self, client):
         """Test force import with no candidates returns unimportable sentinel"""
@@ -903,6 +1053,34 @@ class TestRadarrClient:
             assert "movieId=50" in request.url
             assert "episodeId" not in request.url
 
+    def test_radarr_get_history_for_download_uses_downloadid(self, radarr_client):
+        """Radarr download history uses the same global downloadId filter."""
+        record = {"movieId": 50, "downloadId": "ABC123", "eventType": "grabbed"}
+        with requests_mock.Mocker() as m:
+            m.get(
+                "http://test-radarr:7878/api/v3/history",
+                json={"records": [record]},
+            )
+
+            assert radarr_client.get_history_for_download("ABC123") == [record]
+            request = m.request_history[0]
+            assert request.qs["downloadid"] == ["abc123"]
+            assert "movieid" not in request.qs
+
+    def test_radarr_manual_import_candidate_shape(self, radarr_client):
+        """Public retrieval preserves Radarr movie candidate fields."""
+        items = [
+            {
+                "path": "/downloads/Test.Movie.mkv",
+                "movie": {"id": 50},
+                "customFormatScore": 100,
+            }
+        ]
+        with requests_mock.Mocker() as m:
+            m.get("http://test-radarr:7878/api/v3/manualimport", json=items)
+
+            assert radarr_client.get_manual_import_candidates("ABC123") == items
+
     def test_radarr_get_episode_file_uses_moviefile(self, radarr_client):
         """Test that Radarr uses /moviefile endpoint"""
         mock_file = {"id": 10, "customFormatScore": 50}
@@ -937,6 +1115,28 @@ class TestRadarrClient:
             payload = json.loads(post_request.body)
             assert payload["files"][0]["movieId"] == 50
             assert "episodeIds" not in payload["files"][0]
+
+    def test_radarr_force_import_candidate_uses_validated_movie(self, radarr_client):
+        """Radarr submits only the already validated movie candidate."""
+        candidate = {"path": "/downloads/correct.mkv", "movie": {"id": 50}}
+        with requests_mock.Mocker() as m:
+            m.post(
+                "http://test-radarr:7878/api/v3/command",
+                json={"id": 789},
+                status_code=201,
+            )
+
+            success, _ = radarr_client.force_import_candidate(candidate)
+
+            assert success is True
+            import json
+
+            payload = json.loads(m.request_history[-1].body)
+            assert [item["path"] for item in payload["files"]] == [
+                "/downloads/correct.mkv"
+            ]
+            assert payload["files"][0]["movieId"] == 50
+            assert all(request.method != "GET" for request in m.request_history)
 
     def test_radarr_get_series_by_title_uses_movie(self, radarr_client):
         """Test that Radarr searches /movie endpoint"""
