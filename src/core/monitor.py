@@ -8,7 +8,7 @@ import threading
 import time
 from collections import defaultdict
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..api.sonarr_client import SonarrClient
 from ..api.webhook_server import WebhookServer
@@ -16,6 +16,18 @@ from ..config.loader import ConfigLoader
 from .analyzer import ScoreAnalyzer
 
 logger = logging.getLogger(__name__)
+
+FORCE_IMPORT_COMMAND_POLL_SECONDS = 1.0
+FORCE_IMPORT_COMMAND_TIMEOUT_SECONDS = 120.0
+FORCE_IMPORT_HISTORY_POLL_SECONDS = 1.0
+FORCE_IMPORT_HISTORY_TIMEOUT_SECONDS = 30.0
+TERMINAL_COMMAND_STATUSES = {
+    "completed",
+    "failed",
+    "aborted",
+    "cancelled",
+    "orphaned",
+}
 
 
 class SonarrImportMonitor:
@@ -42,6 +54,11 @@ class SonarrImportMonitor:
         # Webhook server (initialized on demand)
         self.webhook_server: Optional[WebhookServer] = None
         self.webhook_thread: Optional[threading.Thread] = None
+
+        # Polling and webhook processing may overlap. Only one force-import
+        # state machine may own a download ID at a time.
+        self._force_import_lock = threading.Lock()
+        self._force_import_download_ids: Set[str] = set()
 
         # Statistics
         self.stats: Dict[str, Any] = {
@@ -329,7 +346,7 @@ class SonarrImportMonitor:
     def _execute_force_import(
         self, queue_item: Dict, validated_candidate: Optional[Dict] = None
     ) -> bool:
-        """Execute force import action."""
+        """Execute and verify a force import without deleting its torrent."""
         if self.dry_run:
             logger.info("   🔸 DRY RUN: Would force import")
             return True
@@ -343,97 +360,431 @@ class SonarrImportMonitor:
             logger.error("   Missing download ID for force import")
             return False
 
-        if validated_candidate is None:
-            success, command_id = self.sonarr_client.force_import(
-                download_id,
-                quality,
-                output_path=output_path,
-                content_id=content_id,
-            )
-        else:
-            success, command_id = self.sonarr_client.force_import_candidate(
-                validated_candidate,
-                quality,
-            )
-
-        if success:
-            logger.info("   Forced import OK")
-            if command_id:
-                self._verify_import_and_cleanup(
-                    download_id,
-                    queue_item.get("id"),
-                    command_id,
-                    remove_from_client_on_stuck=validated_candidate is None,
-                )
-        elif command_id == -1:
-            # No import candidates from any method - item is permanently unimportable
+        if content_id is None:
+            target_name = "movieId" if self.app_type == "radarr" else "seriesId"
             logger.warning(
-                "   No import candidates available - removing unimportable item from queue"
+                "Force import blocked: downloadId=%s missing target %s; "
+                "queue and torrent left untouched",
+                download_id,
+                target_name,
             )
-            queue_id = queue_item.get("id")
-            if queue_id:
-                removed = self.sonarr_client.remove_from_queue(
-                    queue_id, remove_from_client=True, blocklist=False
-                )
-                if removed:
-                    logger.info("   Removed unimportable item")
-                    return True
-                else:
-                    logger.error("   ❌ Failed to remove unimportable item from queue")
-        else:
-            logger.error("   ❌ Failed to force import")
-
-        return success
-
-    def _is_queue_item_still_stuck(self, queue_id: int) -> bool:
-        """Check if a queue item is still in the queue with a stuck state."""
-        try:
-            queue = self.sonarr_client.get_queue()
-            for item in queue:
-                if item.get("id") == queue_id:
-                    state = item.get("trackedDownloadState", "")
-                    return state in ("importPending", "importBlocked")
-            return False  # Item no longer in queue - import worked
-        except Exception as e:
-            logger.debug(f"Error checking queue item status: {e}")
             return False
 
-    def _verify_import_and_cleanup(
-        self,
-        download_id: str,
-        queue_id: Optional[int],
-        command_id: int,
-        remove_from_client_on_stuck: bool = True,
-    ):
-        """Wait for import command to process and clean up stuck items."""
-        logger.debug(f"   Waiting for import command {command_id} to process...")
-        time.sleep(8)
-
-        logger.debug("   Checking for post-import queue cleanup...")
-        if self.sonarr_client.cleanup_post_import_queue_item(download_id):
-            logger.debug("   Cleaned up stuck queue item after import")
-            return
-
-        if queue_id and self._is_queue_item_still_stuck(queue_id):
-            if remove_from_client_on_stuck:
+        normalized_download_id = str(download_id).casefold()
+        with self._force_import_lock:
+            if normalized_download_id in self._force_import_download_ids:
                 logger.warning(
-                    "   Import command accepted but item still stuck - removing "
-                    "from queue and download client"
+                    "Force import already active: downloadId=%s; duplicate "
+                    "webhook/poll submission skipped",
+                    download_id,
+                )
+                return False
+            self._force_import_download_ids.add(normalized_download_id)
+
+        try:
+            try:
+                history = self.sonarr_client.get_history_for_download(download_id)
+            except Exception as exc:
+                logger.warning(
+                    "Force import blocked: downloadId=%s history preflight failed: %s; "
+                    "queue and torrent left untouched",
+                    download_id,
+                    exc,
+                )
+                return False
+
+            latest_grab = self._latest_grab_timestamp(history, download_id)
+            if latest_grab is not None:
+                imported_event, blocker = self._find_confirmed_import_event(
+                    queue_item, history, latest_grab
+                )
+                if blocker:
+                    logger.warning(
+                        "Force import blocked: downloadId=%s %s; queue and torrent "
+                        "left untouched",
+                        download_id,
+                        blocker,
+                    )
+                    return False
+                if imported_event is not None:
+                    logger.info(
+                        "Force import preflight confirmed existing import: "
+                        "downloadId=%s historyEventId=%s %s; command resubmission skipped",
+                        download_id,
+                        imported_event.get("id"),
+                        self._format_target_ids(queue_item),
+                    )
+                    return self._cleanup_confirmed_import(queue_item, imported_event)
+
+            try:
+                active_command = self.sonarr_client.get_active_manual_import_command(
+                    download_id
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Force import blocked: downloadId=%s active-command discovery "
+                    "failed: %s; queue and torrent left untouched",
+                    download_id,
+                    exc,
+                )
+                return False
+
+            if active_command is not None:
+                command_id = active_command.get("id")
+                if command_id is None:
+                    logger.warning(
+                        "Force import blocked: downloadId=%s active ManualImport has "
+                        "no command ID; queue and torrent left untouched",
+                        download_id,
+                    )
+                    return False
+                logger.info(
+                    "Force import reusing active ManualImport: downloadId=%s "
+                    "commandId=%s status=%s %s",
+                    download_id,
+                    command_id,
+                    active_command.get("status"),
+                    self._format_target_ids(queue_item),
                 )
             else:
-                logger.warning(
-                    "   Validated cross-content import command accepted but item "
-                    "still stuck - queue-only cleanup; download remains in client"
+                if latest_grab is None:
+                    logger.warning(
+                        "Force import blocked: downloadId=%s has no matching grabbed "
+                        "history and no active ManualImport; queue and torrent left "
+                        "untouched",
+                        download_id,
+                    )
+                    return False
+                if validated_candidate is None:
+                    success, command_id = self.sonarr_client.force_import(
+                        download_id,
+                        quality,
+                        output_path=output_path,
+                        content_id=content_id,
+                    )
+                else:
+                    success, command_id = self.sonarr_client.force_import_candidate(
+                        validated_candidate,
+                        quality,
+                    )
+
+                if not success:
+                    if command_id == -1:
+                        logger.warning(
+                            "Force import blocked: downloadId=%s no manual-import "
+                            "candidates; queue and torrent left untouched",
+                            download_id,
+                        )
+                    else:
+                        logger.warning(
+                            "Force import blocked: downloadId=%s ManualImport "
+                            "submission failed; queue and torrent left untouched",
+                            download_id,
+                        )
+                    return False
+                if command_id is None:
+                    logger.warning(
+                        "Force import blocked: downloadId=%s ManualImport submission "
+                        "returned no command ID; queue and torrent left untouched",
+                        download_id,
+                    )
+                    return False
+                logger.info(
+                    "Force import submitted: downloadId=%s commandId=%s %s",
+                    download_id,
+                    command_id,
+                    self._format_target_ids(queue_item),
                 )
-            removed = self.sonarr_client.remove_from_queue(
-                queue_id,
-                remove_from_client=remove_from_client_on_stuck,
-                blocklist=False,
+
+            completed_command, blocker = self._wait_for_import_command(command_id)
+            if blocker or completed_command is None:
+                logger.warning(
+                    "Force import blocked: downloadId=%s commandId=%s %s; queue and "
+                    "torrent left untouched",
+                    download_id,
+                    command_id,
+                    blocker or "command state unavailable",
+                )
+                return False
+
+            evidence_start = (
+                self._parse_arr_timestamp(completed_command.get("queued"))
+                or latest_grab
             )
-            if removed:
-                logger.info("   Removed still-stuck item")
-            else:
-                logger.error("   ❌ Failed to remove still-stuck item")
+            if evidence_start is None:
+                logger.warning(
+                    "Force import blocked: downloadId=%s commandId=%s missing command "
+                    "and grab timestamps; queue and torrent left untouched",
+                    download_id,
+                    command_id,
+                )
+                return False
+
+            imported_event, blocker = self._wait_for_import_history(
+                queue_item, evidence_start
+            )
+            if blocker or imported_event is None:
+                logger.warning(
+                    "Force import blocked: downloadId=%s commandId=%s %s; queue and "
+                    "torrent left untouched",
+                    download_id,
+                    command_id,
+                    blocker or "matching import history unavailable",
+                )
+                return False
+
+            logger.info(
+                "Force import verified: downloadId=%s commandId=%s status=%s "
+                "result=%s historyEventId=%s %s",
+                download_id,
+                command_id,
+                completed_command.get("status"),
+                completed_command.get("result"),
+                imported_event.get("id"),
+                self._format_target_ids(queue_item),
+            )
+            return self._cleanup_confirmed_import(queue_item, imported_event)
+        except Exception as exc:
+            logger.warning(
+                "Force import blocked: downloadId=%s unexpected verification error: "
+                "%s; queue and torrent left untouched",
+                download_id,
+                exc,
+            )
+            return False
+        finally:
+            with self._force_import_lock:
+                self._force_import_download_ids.discard(normalized_download_id)
+
+    @staticmethod
+    def _parse_arr_timestamp(value: Any) -> Optional[datetime]:
+        """Parse an Arr ISO-8601 timestamp for ordering import evidence."""
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    def _latest_grab_timestamp(
+        self, history: List[Dict], download_id: str
+    ) -> Optional[datetime]:
+        """Return the latest matching grab timestamp for a download ID."""
+        normalized_download_id = str(download_id).casefold()
+        timestamps = [
+            timestamp
+            for event in history
+            if str(event.get("eventType") or "").casefold() == "grabbed"
+            and str(event.get("downloadId") or "").casefold() == normalized_download_id
+            and (timestamp := self._parse_arr_timestamp(event.get("date"))) is not None
+        ]
+        return max(timestamps) if timestamps else None
+
+    def _find_confirmed_import_event(
+        self,
+        queue_item: Dict,
+        history: List[Dict],
+        not_before: datetime,
+    ) -> Tuple[Optional[Dict], Optional[str]]:
+        """Find correct-target import evidence and reject conflicting owners."""
+        download_id = str(queue_item.get("downloadId") or "")
+        normalized_download_id = download_id.casefold()
+        content_id = self._get_content_id(queue_item)
+        owner_key = "movieId" if self.app_type == "radarr" else "seriesId"
+        nested_owner_key = "movie" if self.app_type == "radarr" else "series"
+        target_episode_id = None
+        if self.app_type != "radarr":
+            target_episode_id = (queue_item.get("episode") or {}).get("id")
+
+        matching_import = None
+        for event in history:
+            if (
+                str(event.get("eventType") or "").casefold() != "downloadfolderimported"
+                or str(event.get("downloadId") or "").casefold()
+                != normalized_download_id
+            ):
+                continue
+
+            event_date = self._parse_arr_timestamp(event.get("date"))
+            if event_date is None or event_date < not_before:
+                continue
+
+            owner_id = event.get(owner_key)
+            if owner_id is None:
+                owner_id = (event.get(nested_owner_key) or {}).get("id")
+            if owner_id is None:
+                return None, (f"history event {event.get('id')} is missing {owner_key}")
+            if owner_id != content_id:
+                return None, (
+                    f"conflicting history event {event.get('id')} has "
+                    f"{owner_key}={owner_id}, expected {content_id}"
+                )
+
+            if self.app_type == "radarr" or target_episode_id is None:
+                matching_import = event
+                continue
+
+            event_episode_id = event.get("episodeId")
+            if event_episode_id is None:
+                event_episode_id = (event.get("episode") or {}).get("id")
+            if event_episode_id == target_episode_id:
+                matching_import = event
+
+        return matching_import, None
+
+    def _wait_for_import_command(
+        self, command_id: int
+    ) -> Tuple[Optional[Dict], Optional[str]]:
+        """Poll a ManualImport command until it succeeds or becomes unsafe."""
+        deadline = time.monotonic() + FORCE_IMPORT_COMMAND_TIMEOUT_SECONDS
+        last_state: Optional[Tuple[str, str]] = None
+
+        while True:
+            try:
+                command = self.sonarr_client.get_command(command_id)
+            except Exception as exc:
+                return None, f"command lookup failed: {exc}"
+
+            status = str(command.get("status") or "").casefold()
+            result = str(command.get("result") or "").casefold()
+            state = (status, result)
+            if state != last_state:
+                logger.info(
+                    "ManualImport command state: commandId=%s status=%s result=%s",
+                    command_id,
+                    status or "missing",
+                    result or "missing",
+                )
+                last_state = state
+
+            if status == "completed":
+                if result == "successful":
+                    return command, None
+                return None, (f"command completed with result={result or 'missing'}")
+            if status in TERMINAL_COMMAND_STATUSES:
+                return None, (
+                    f"command terminal status={status} result={result or 'missing'}"
+                )
+            if status not in {"queued", "started"}:
+                return None, f"command has unexpected status={status or 'missing'}"
+            if time.monotonic() >= deadline:
+                return None, (
+                    f"command timed out after {FORCE_IMPORT_COMMAND_TIMEOUT_SECONDS:g}s "
+                    f"at status={status} result={result or 'missing'}"
+                )
+            time.sleep(FORCE_IMPORT_COMMAND_POLL_SECONDS)
+
+    def _wait_for_import_history(
+        self, queue_item: Dict, not_before: datetime
+    ) -> Tuple[Optional[Dict], Optional[str]]:
+        """Poll download-ID history for correct-target import evidence."""
+        download_id = str(queue_item.get("downloadId") or "")
+        deadline = time.monotonic() + FORCE_IMPORT_HISTORY_TIMEOUT_SECONDS
+
+        while True:
+            try:
+                history = self.sonarr_client.get_history_for_download(download_id)
+            except Exception as exc:
+                return None, f"history lookup failed: {exc}"
+
+            imported_event, blocker = self._find_confirmed_import_event(
+                queue_item, history, not_before
+            )
+            if blocker:
+                return None, blocker
+            if imported_event is not None:
+                return imported_event, None
+            if time.monotonic() >= deadline:
+                return None, (
+                    "matching correct-target import history timed out after "
+                    f"{FORCE_IMPORT_HISTORY_TIMEOUT_SECONDS:g}s"
+                )
+            time.sleep(FORCE_IMPORT_HISTORY_POLL_SECONDS)
+
+    def _cleanup_confirmed_import(self, queue_item: Dict, imported_event: Dict) -> bool:
+        """Remove a stale Arr row only after import history is confirmed."""
+        download_id = str(queue_item.get("downloadId") or "")
+        queue_id = queue_item.get("id")
+        try:
+            queue = self.sonarr_client.get_queue(raise_on_error=True)
+        except Exception as exc:
+            logger.warning(
+                "Confirmed import cleanup blocked: downloadId=%s historyEventId=%s "
+                "queue lookup failed: %s; queue and torrent left untouched",
+                download_id,
+                imported_event.get("id"),
+                exc,
+            )
+            return False
+
+        current_item = next(
+            (
+                item
+                for item in queue
+                if queue_id is not None and item.get("id") == queue_id
+            ),
+            None,
+        )
+        if current_item is None:
+            normalized_download_id = download_id.casefold()
+            current_item = next(
+                (
+                    item
+                    for item in queue
+                    if str(item.get("downloadId") or "").casefold()
+                    == normalized_download_id
+                ),
+                None,
+            )
+
+        if current_item is None:
+            logger.info(
+                "Force import cleanup complete: downloadId=%s historyEventId=%s "
+                "Arr queue row already absent; torrent preserved",
+                download_id,
+                imported_event.get("id"),
+            )
+            return True
+
+        current_queue_id = current_item.get("id")
+        if current_queue_id is None:
+            logger.warning(
+                "Confirmed import cleanup blocked: downloadId=%s historyEventId=%s "
+                "remaining queue row has no ID; queue and torrent left untouched",
+                download_id,
+                imported_event.get("id"),
+            )
+            return False
+
+        removed = self.sonarr_client.remove_from_queue(
+            current_queue_id, remove_from_client=False, blocklist=False
+        )
+        if not removed:
+            logger.warning(
+                "Confirmed import cleanup failed: downloadId=%s queueId=%s "
+                "historyEventId=%s; torrent left untouched",
+                download_id,
+                current_queue_id,
+                imported_event.get("id"),
+            )
+            return False
+
+        logger.info(
+            "Force import cleanup complete: downloadId=%s queueId=%s "
+            "historyEventId=%s action=queue-only removeFromClient=false "
+            "blocklist=false; torrent preserved",
+            download_id,
+            current_queue_id,
+            imported_event.get("id"),
+        )
+        return True
+
+    def _format_target_ids(self, queue_item: Dict) -> str:
+        """Format target identifiers for force-import audit logs."""
+        if self.app_type == "radarr":
+            return f"movieId={self._get_content_id(queue_item)}"
+        episode_id = (queue_item.get("episode") or {}).get("id")
+        return f"seriesId={self._get_content_id(queue_item)} episodeId={episode_id}"
 
     def _execute_removal(self, queue_item: Dict) -> bool:
         """Execute removal action."""

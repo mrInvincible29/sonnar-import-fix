@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Resolve cross-series and cross-movie stuck imports using download history and validated manual-import candidates, while preserving seeding torrents during queue-only cleanup.
+- Preserve torrents during every forced Sonarr/Radarr import by using automatic import mode, command completion, and target-matching history before queue-only cleanup.
 
 ## [2.2.0] - 2025-08-29
 

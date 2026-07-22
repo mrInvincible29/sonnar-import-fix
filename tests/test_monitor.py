@@ -459,12 +459,56 @@ class TestActionExecution:
 
         return monitor
 
-    def test_execute_force_import_success(self, monitor, mock_sonarr_queue_item):
-        """Test successful force import execution"""
-        monitor.sonarr_client.force_import.return_value = (True, 123)
-        monitor.sonarr_client.cleanup_post_import_queue_item.return_value = True
+    @staticmethod
+    def _grab_event(download_id="ABC123DEF456", series_id=10, episode_id=100):
+        return {
+            "eventType": "grabbed",
+            "date": "2026-07-22T02:45:01Z",
+            "downloadId": download_id,
+            "seriesId": series_id,
+            "episodeId": episode_id,
+        }
 
-        result = monitor._execute_force_import(mock_sonarr_queue_item)
+    @staticmethod
+    def _import_event(download_id="ABC123DEF456", series_id=10, episode_id=100):
+        return {
+            "id": 45648,
+            "eventType": "downloadFolderImported",
+            "date": "2026-07-22T02:49:39Z",
+            "downloadId": download_id,
+            "seriesId": series_id,
+            "episodeId": episode_id,
+        }
+
+    def _configure_successful_import(
+        self, monitor, queue_item, queue_after_command=None
+    ):
+        grab = self._grab_event(download_id=queue_item["downloadId"].upper())
+        imported = self._import_event(download_id=queue_item["downloadId"].upper())
+        monitor.sonarr_client.get_history_for_download.side_effect = [
+            [grab],
+            [imported, grab],
+        ]
+        monitor.sonarr_client.get_active_manual_import_command.return_value = None
+        monitor.sonarr_client.force_import.return_value = (True, 123)
+        monitor.sonarr_client.get_command.return_value = {
+            "id": 123,
+            "name": "ManualImport",
+            "status": "completed",
+            "result": "successful",
+            "queued": "2026-07-22T02:49:38Z",
+            "ended": "2026-07-22T02:49:39Z",
+        }
+        monitor.sonarr_client.get_queue.return_value = (
+            [] if queue_after_command is None else queue_after_command
+        )
+
+    def test_execute_force_import_success(self, monitor, mock_sonarr_queue_item):
+        """A successful command plus target history confirms the import."""
+        self._configure_successful_import(monitor, mock_sonarr_queue_item)
+
+        with patch("src.core.monitor.time.sleep"):
+            result = monitor._execute_force_import(mock_sonarr_queue_item)
 
         assert result is True
         monitor.sonarr_client.force_import.assert_called_once_with(
@@ -473,6 +517,7 @@ class TestActionExecution:
             output_path="/downloads/complete/tv/Test.Episode.S01E01",
             content_id=10,
         )
+        monitor.sonarr_client.remove_from_queue.assert_not_called()
 
     def test_execute_force_import_uses_validated_candidate_without_requery(
         self, monitor, mock_sonarr_queue_item
@@ -482,9 +527,24 @@ class TestActionExecution:
             "series": {"id": 10},
             "episodes": [{"id": 100}],
         }
-        monitor.sonarr_client.force_import_candidate.return_value = (True, None)
+        grab = self._grab_event()
+        imported = self._import_event()
+        monitor.sonarr_client.get_history_for_download.side_effect = [
+            [grab],
+            [imported, grab],
+        ]
+        monitor.sonarr_client.get_active_manual_import_command.return_value = None
+        monitor.sonarr_client.force_import_candidate.return_value = (True, 123)
+        monitor.sonarr_client.get_command.return_value = {
+            "id": 123,
+            "status": "completed",
+            "result": "successful",
+            "queued": "2026-07-22T02:49:38Z",
+        }
+        monitor.sonarr_client.get_queue.return_value = []
 
-        result = monitor._execute_force_import(mock_sonarr_queue_item, candidate)
+        with patch("src.core.monitor.time.sleep"):
+            result = monitor._execute_force_import(mock_sonarr_queue_item, candidate)
 
         assert result is True
         monitor.sonarr_client.force_import_candidate.assert_called_once_with(
@@ -496,17 +556,30 @@ class TestActionExecution:
     def test_validated_force_import_stuck_cleanup_keeps_download_client(
         self, monitor, mock_sonarr_queue_item
     ):
-        """A validated cross-content import must never remove its torrent."""
+        """Confirmed validated imports use queue-only cleanup."""
         candidate = {
             "path": "/downloads/correct.mkv",
             "series": {"id": 10},
             "episodes": [{"id": 100}],
         }
+        grab = self._grab_event()
+        imported = self._import_event()
+        monitor.sonarr_client.get_history_for_download.side_effect = [
+            [grab],
+            [imported, grab],
+        ]
+        monitor.sonarr_client.get_active_manual_import_command.return_value = None
         monitor.sonarr_client.force_import_candidate.return_value = (True, 123)
-        monitor.sonarr_client.cleanup_post_import_queue_item.return_value = False
+        monitor.sonarr_client.get_command.return_value = {
+            "id": 123,
+            "status": "completed",
+            "result": "successful",
+            "queued": "2026-07-22T02:49:38Z",
+        }
         monitor.sonarr_client.get_queue.return_value = [
             {"id": 1, "trackedDownloadState": "importPending"}
         ]
+        monitor.sonarr_client.cleanup_post_import_queue_item.return_value = False
         monitor.sonarr_client.remove_from_queue.return_value = True
 
         with patch("src.core.monitor.time.sleep"):
@@ -516,6 +589,296 @@ class TestActionExecution:
         monitor.sonarr_client.remove_from_queue.assert_called_once_with(
             1, remove_from_client=False, blocklist=False
         )
+
+    def test_matched_by_id_stale_queue_cleanup_keeps_torrent(
+        self, monitor, mock_sonarr_queue_item
+    ):
+        """Regression for 02c567: successful import plus stale queue is safe."""
+        self._configure_successful_import(
+            monitor,
+            mock_sonarr_queue_item,
+            [{"id": 1, "trackedDownloadState": "importBlocked"}],
+        )
+        monitor.sonarr_client.cleanup_post_import_queue_item.return_value = False
+        monitor.sonarr_client.remove_from_queue.return_value = True
+
+        with patch("src.core.monitor.time.sleep"):
+            result = monitor._execute_force_import(mock_sonarr_queue_item)
+
+        assert result is True
+        monitor.sonarr_client.remove_from_queue.assert_called_once_with(
+            1, remove_from_client=False, blocklist=False
+        )
+
+    def test_existing_import_history_skips_duplicate_command(
+        self, monitor, mock_sonarr_queue_item
+    ):
+        grab = self._grab_event()
+        imported = self._import_event()
+        monitor.sonarr_client.get_history_for_download.return_value = [
+            imported,
+            grab,
+        ]
+        monitor.sonarr_client.get_queue.return_value = [mock_sonarr_queue_item]
+        monitor.sonarr_client.remove_from_queue.return_value = True
+
+        result = monitor._execute_force_import(mock_sonarr_queue_item)
+
+        assert result is True
+        monitor.sonarr_client.force_import.assert_not_called()
+        monitor.sonarr_client.get_active_manual_import_command.assert_not_called()
+        monitor.sonarr_client.remove_from_queue.assert_called_once_with(
+            1, remove_from_client=False, blocklist=False
+        )
+
+    def test_active_manual_import_is_reused_without_resubmission(
+        self, monitor, mock_sonarr_queue_item
+    ):
+        grab = self._grab_event()
+        imported = self._import_event()
+        monitor.sonarr_client.get_history_for_download.side_effect = [
+            [grab],
+            [imported, grab],
+        ]
+        monitor.sonarr_client.get_active_manual_import_command.return_value = {
+            "id": 321,
+            "name": "ManualImport",
+            "status": "started",
+            "queued": "2026-07-22T02:49:38Z",
+        }
+        monitor.sonarr_client.get_command.return_value = {
+            "id": 321,
+            "status": "completed",
+            "result": "successful",
+            "queued": "2026-07-22T02:49:38Z",
+        }
+        monitor.sonarr_client.get_queue.return_value = []
+
+        with patch("src.core.monitor.time.sleep"):
+            assert monitor._execute_force_import(mock_sonarr_queue_item) is True
+
+        monitor.sonarr_client.force_import.assert_not_called()
+        monitor.sonarr_client.force_import_candidate.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("status", "result"),
+        [
+            ("completed", "unsuccessful"),
+            ("failed", "unsuccessful"),
+            ("aborted", "unsuccessful"),
+            ("cancelled", "unsuccessful"),
+            ("orphaned", "indeterminate"),
+        ],
+    )
+    def test_terminal_command_failure_leaves_queue_and_torrent(
+        self, monitor, mock_sonarr_queue_item, status, result
+    ):
+        monitor.sonarr_client.get_history_for_download.return_value = [
+            self._grab_event()
+        ]
+        monitor.sonarr_client.get_active_manual_import_command.return_value = None
+        monitor.sonarr_client.force_import.return_value = (True, 123)
+        monitor.sonarr_client.get_command.return_value = {
+            "id": 123,
+            "status": status,
+            "result": result,
+            "message": "Import failed",
+        }
+
+        assert monitor._execute_force_import(mock_sonarr_queue_item) is False
+        monitor.sonarr_client.remove_from_queue.assert_not_called()
+
+    def test_command_timeout_leaves_queue_and_torrent(
+        self, monitor, mock_sonarr_queue_item
+    ):
+        monitor.sonarr_client.get_history_for_download.return_value = [
+            self._grab_event()
+        ]
+        monitor.sonarr_client.get_active_manual_import_command.return_value = None
+        monitor.sonarr_client.force_import.return_value = (True, 123)
+        monitor.sonarr_client.get_command.return_value = {
+            "id": 123,
+            "status": "started",
+            "result": "unknown",
+        }
+
+        with patch(
+            "src.core.monitor.FORCE_IMPORT_COMMAND_TIMEOUT_SECONDS", 0, create=True
+        ), patch("src.core.monitor.time.sleep"):
+            assert monitor._execute_force_import(mock_sonarr_queue_item) is False
+
+        monitor.sonarr_client.remove_from_queue.assert_not_called()
+
+    def test_success_without_matching_history_leaves_queue_and_torrent(
+        self, monitor, mock_sonarr_queue_item
+    ):
+        grab = self._grab_event()
+        monitor.sonarr_client.get_history_for_download.return_value = [grab]
+        monitor.sonarr_client.get_active_manual_import_command.return_value = None
+        monitor.sonarr_client.force_import.return_value = (True, 123)
+        monitor.sonarr_client.get_command.return_value = {
+            "id": 123,
+            "status": "completed",
+            "result": "successful",
+            "queued": "2026-07-22T02:49:38Z",
+        }
+
+        with patch(
+            "src.core.monitor.FORCE_IMPORT_HISTORY_TIMEOUT_SECONDS", 0, create=True
+        ), patch("src.core.monitor.time.sleep"):
+            assert monitor._execute_force_import(mock_sonarr_queue_item) is False
+
+        monitor.sonarr_client.remove_from_queue.assert_not_called()
+
+    def test_conflicting_import_history_leaves_queue_and_torrent(
+        self, monitor, mock_sonarr_queue_item
+    ):
+        grab = self._grab_event()
+        wrong_import = self._import_event(series_id=999, episode_id=9999)
+        monitor.sonarr_client.get_history_for_download.side_effect = [
+            [grab],
+            [wrong_import, grab],
+        ]
+        monitor.sonarr_client.get_active_manual_import_command.return_value = None
+        monitor.sonarr_client.force_import.return_value = (True, 123)
+        monitor.sonarr_client.get_command.return_value = {
+            "id": 123,
+            "status": "completed",
+            "result": "successful",
+            "queued": "2026-07-22T02:49:38Z",
+        }
+
+        with patch("src.core.monitor.time.sleep"):
+            assert monitor._execute_force_import(mock_sonarr_queue_item) is False
+
+        monitor.sonarr_client.remove_from_queue.assert_not_called()
+
+    def test_command_polling_waits_for_success(self, monitor, mock_sonarr_queue_item):
+        grab = self._grab_event()
+        imported = self._import_event()
+        monitor.sonarr_client.get_history_for_download.side_effect = [
+            [grab],
+            [imported, grab],
+        ]
+        monitor.sonarr_client.get_active_manual_import_command.return_value = None
+        monitor.sonarr_client.force_import.return_value = (True, 123)
+        monitor.sonarr_client.get_command.side_effect = [
+            {"id": 123, "status": "queued", "result": "unknown"},
+            {
+                "id": 123,
+                "status": "completed",
+                "result": "successful",
+                "queued": "2026-07-22T02:49:38Z",
+            },
+        ]
+        monitor.sonarr_client.get_queue.return_value = []
+
+        with patch("src.core.monitor.time.sleep") as mock_sleep:
+            assert monitor._execute_force_import(mock_sonarr_queue_item) is True
+
+        mock_sleep.assert_called_once_with(1.0)
+        assert monitor.sonarr_client.get_command.call_count == 2
+
+    def test_season_pack_history_accepts_target_episode_without_conflict(
+        self, monitor, mock_sonarr_queue_item
+    ):
+        grab = self._grab_event()
+        pack_episode = self._import_event(episode_id=101)
+        target_episode = self._import_event(episode_id=100)
+        monitor.sonarr_client.get_history_for_download.side_effect = [
+            [grab],
+            [pack_episode, target_episode, grab],
+        ]
+        monitor.sonarr_client.get_active_manual_import_command.return_value = None
+        monitor.sonarr_client.force_import.return_value = (True, 123)
+        monitor.sonarr_client.get_command.return_value = {
+            "id": 123,
+            "status": "completed",
+            "result": "successful",
+            "queued": "2026-07-22T02:49:38Z",
+        }
+        monitor.sonarr_client.get_queue.return_value = []
+
+        assert monitor._execute_force_import(mock_sonarr_queue_item) is True
+        monitor.sonarr_client.remove_from_queue.assert_not_called()
+
+    def test_history_preflight_api_failure_is_safe(
+        self, monitor, mock_sonarr_queue_item, caplog
+    ):
+        monitor.sonarr_client.get_history_for_download.side_effect = Exception(
+            "history unavailable"
+        )
+
+        assert monitor._execute_force_import(mock_sonarr_queue_item) is False
+        monitor.sonarr_client.force_import.assert_not_called()
+        monitor.sonarr_client.remove_from_queue.assert_not_called()
+        assert "queue and torrent left untouched" in caplog.text
+
+    def test_missing_grab_history_does_not_submit_a_duplicate(
+        self, monitor, mock_sonarr_queue_item
+    ):
+        monitor.sonarr_client.get_history_for_download.return_value = []
+        monitor.sonarr_client.get_active_manual_import_command.return_value = None
+
+        assert monitor._execute_force_import(mock_sonarr_queue_item) is False
+        monitor.sonarr_client.force_import.assert_not_called()
+        monitor.sonarr_client.force_import_candidate.assert_not_called()
+        monitor.sonarr_client.remove_from_queue.assert_not_called()
+
+    def test_active_command_discovery_api_failure_is_safe(
+        self, monitor, mock_sonarr_queue_item
+    ):
+        monitor.sonarr_client.get_history_for_download.return_value = [
+            self._grab_event()
+        ]
+        monitor.sonarr_client.get_active_manual_import_command.side_effect = Exception(
+            "commands unavailable"
+        )
+
+        assert monitor._execute_force_import(mock_sonarr_queue_item) is False
+        monitor.sonarr_client.force_import.assert_not_called()
+        monitor.sonarr_client.remove_from_queue.assert_not_called()
+
+    def test_command_lookup_api_failure_is_safe(self, monitor, mock_sonarr_queue_item):
+        monitor.sonarr_client.get_history_for_download.return_value = [
+            self._grab_event()
+        ]
+        monitor.sonarr_client.get_active_manual_import_command.return_value = None
+        monitor.sonarr_client.force_import.return_value = (True, 123)
+        monitor.sonarr_client.get_command.side_effect = Exception("command unavailable")
+
+        assert monitor._execute_force_import(mock_sonarr_queue_item) is False
+        monitor.sonarr_client.remove_from_queue.assert_not_called()
+
+    def test_post_command_history_api_failure_is_safe(
+        self, monitor, mock_sonarr_queue_item
+    ):
+        monitor.sonarr_client.get_history_for_download.side_effect = [
+            [self._grab_event()],
+            Exception("history unavailable"),
+        ]
+        monitor.sonarr_client.get_active_manual_import_command.return_value = None
+        monitor.sonarr_client.force_import.return_value = (True, 123)
+        monitor.sonarr_client.get_command.return_value = {
+            "id": 123,
+            "status": "completed",
+            "result": "successful",
+            "queued": "2026-07-22T02:49:38Z",
+        }
+
+        assert monitor._execute_force_import(mock_sonarr_queue_item) is False
+        monitor.sonarr_client.remove_from_queue.assert_not_called()
+
+    def test_cleanup_queue_api_failure_is_safe(self, monitor, mock_sonarr_queue_item):
+        monitor.sonarr_client.get_history_for_download.return_value = [
+            self._import_event(),
+            self._grab_event(),
+        ]
+        monitor.sonarr_client.get_queue.side_effect = Exception("queue unavailable")
+
+        assert monitor._execute_force_import(mock_sonarr_queue_item) is False
+        monitor.sonarr_client.force_import.assert_not_called()
+        monitor.sonarr_client.remove_from_queue.assert_not_called()
 
     def test_execute_force_import_missing_data(self, monitor):
         """Test force import with missing data"""
@@ -538,37 +901,30 @@ class TestActionExecution:
         # Should not call actual API
         monitor.sonarr_client.force_import.assert_not_called()
 
-    def test_execute_force_import_unimportable_removes_from_queue(
+    def test_execute_force_import_unimportable_leaves_queue_and_torrent(
         self, monitor, mock_sonarr_queue_item
     ):
-        """Test that unimportable items (command_id=-1) are removed from queue"""
+        """No candidates is evidence failure, not permission to delete."""
+        monitor.sonarr_client.get_history_for_download.return_value = [
+            self._grab_event()
+        ]
+        monitor.sonarr_client.get_active_manual_import_command.return_value = None
         monitor.sonarr_client.force_import.return_value = (False, -1)
-        monitor.sonarr_client.remove_from_queue.return_value = True
-
-        result = monitor._execute_force_import(mock_sonarr_queue_item)
-
-        assert result is True
-        monitor.sonarr_client.remove_from_queue.assert_called_once_with(
-            1, remove_from_client=True, blocklist=False
-        )
-
-    def test_execute_force_import_unimportable_removal_fails(
-        self, monitor, mock_sonarr_queue_item
-    ):
-        """Test unimportable item when queue removal also fails"""
-        monitor.sonarr_client.force_import.return_value = (False, -1)
-        monitor.sonarr_client.remove_from_queue.return_value = False
 
         result = monitor._execute_force_import(mock_sonarr_queue_item)
 
         assert result is False
+        monitor.sonarr_client.remove_from_queue.assert_not_called()
 
     def test_execute_force_import_passes_extra_params(
         self, monitor, mock_sonarr_queue_item
     ):
         """Test that outputPath and seriesId are passed to force_import"""
-        monitor.sonarr_client.force_import.return_value = (True, 123)
-        monitor.sonarr_client.cleanup_post_import_queue_item.return_value = True
+        monitor.sonarr_client.get_history_for_download.return_value = [
+            self._grab_event()
+        ]
+        monitor.sonarr_client.get_active_manual_import_command.return_value = None
+        monitor.sonarr_client.force_import.return_value = (False, -1)
 
         monitor._execute_force_import(mock_sonarr_queue_item)
 
@@ -579,35 +935,25 @@ class TestActionExecution:
             content_id=10,
         )
 
-    def test_execute_force_import_removes_still_stuck_item(
+    def test_concurrent_force_import_for_same_hash_is_not_duplicated(
         self, monitor, mock_sonarr_queue_item
     ):
-        """Test that items still stuck after import command are removed"""
-        monitor.sonarr_client.force_import.return_value = (True, 123)
-        monitor.sonarr_client.cleanup_post_import_queue_item.return_value = False
-        # Item is still in queue with importPending state
-        monitor.sonarr_client.get_queue.return_value = [
-            {"id": 1, "trackedDownloadState": "importPending"}
-        ]
-        monitor.sonarr_client.remove_from_queue.return_value = True
+        monitor._force_import_download_ids.add("abc123def456")
 
         result = monitor._execute_force_import(mock_sonarr_queue_item)
 
-        assert result is True
-        monitor.sonarr_client.remove_from_queue.assert_called_once_with(
-            1, remove_from_client=True, blocklist=False
-        )
+        assert result is False
+        monitor.sonarr_client.get_history_for_download.assert_not_called()
+        monitor.sonarr_client.force_import.assert_not_called()
 
     def test_execute_force_import_no_removal_if_import_worked(
         self, monitor, mock_sonarr_queue_item
     ):
         """Test that items successfully imported are not removed"""
-        monitor.sonarr_client.force_import.return_value = (True, 123)
-        monitor.sonarr_client.cleanup_post_import_queue_item.return_value = False
-        # Item no longer in queue - import worked
-        monitor.sonarr_client.get_queue.return_value = []
+        self._configure_successful_import(monitor, mock_sonarr_queue_item)
 
-        result = monitor._execute_force_import(mock_sonarr_queue_item)
+        with patch("src.core.monitor.time.sleep"):
+            result = monitor._execute_force_import(mock_sonarr_queue_item)
 
         assert result is True
         monitor.sonarr_client.remove_from_queue.assert_not_called()
@@ -1043,7 +1389,7 @@ class TestCompleteWorkflow:
                     # Update existing stats dictionary instead of replacing
                     monitor.stats.update({"forced_imports": 0, "items_processed": 0})
 
-                    mock_client.get_queue.return_value = stuck_items
+                    mock_client.get_queue.side_effect = [stuck_items, []]
 
                     # Mock analysis decision
                     decision = Decision(
@@ -1061,7 +1407,35 @@ class TestCompleteWorkflow:
                     mock_analyzer.analyze_queue_item.return_value = decision
 
                     # Mock successful execution
+                    mock_client.get_history_for_download.side_effect = [
+                        [
+                            {
+                                "eventType": "grabbed",
+                                "date": "2026-07-22T02:45:01Z",
+                                "downloadId": "ABC123DEF456",
+                                "seriesId": 10,
+                                "episodeId": 100,
+                            }
+                        ],
+                        [
+                            {
+                                "id": 45648,
+                                "eventType": "downloadFolderImported",
+                                "date": "2026-07-22T02:49:39Z",
+                                "downloadId": "ABC123DEF456",
+                                "seriesId": 10,
+                                "episodeId": 100,
+                            }
+                        ],
+                    ]
+                    mock_client.get_active_manual_import_command.return_value = None
                     mock_client.force_import.return_value = (True, 123)
+                    mock_client.get_command.return_value = {
+                        "id": 123,
+                        "status": "completed",
+                        "result": "successful",
+                        "queued": "2026-07-22T02:49:38Z",
+                    }
 
                     results = monitor.process_stuck_imports()
 
@@ -1105,10 +1479,38 @@ class TestRadarrMonitor:
         self, radarr_monitor, mock_radarr_queue_item
     ):
         """Test that Radarr force import uses movie.id"""
+        radarr_monitor.sonarr_client.get_history_for_download.side_effect = [
+            [
+                {
+                    "eventType": "grabbed",
+                    "date": "2026-07-22T02:45:01Z",
+                    "downloadId": "ABC123DEF456",
+                    "movieId": 50,
+                }
+            ],
+            [
+                {
+                    "id": 9001,
+                    "eventType": "downloadFolderImported",
+                    "date": "2026-07-22T02:49:39Z",
+                    "downloadId": "ABC123DEF456",
+                    "movieId": 50,
+                }
+            ],
+        ]
+        radarr_monitor.sonarr_client.get_active_manual_import_command.return_value = (
+            None
+        )
         radarr_monitor.sonarr_client.force_import.return_value = (True, 123)
-        radarr_monitor.sonarr_client.cleanup_post_import_queue_item.return_value = True
+        radarr_monitor.sonarr_client.get_command.return_value = {
+            "id": 123,
+            "status": "completed",
+            "result": "successful",
+            "queued": "2026-07-22T02:49:38Z",
+        }
+        radarr_monitor.sonarr_client.get_queue.return_value = []
 
-        radarr_monitor._execute_force_import(mock_radarr_queue_item)
+        assert radarr_monitor._execute_force_import(mock_radarr_queue_item) is True
 
         radarr_monitor.sonarr_client.force_import.assert_called_once_with(
             "abc123def456",
@@ -1116,6 +1518,7 @@ class TestRadarrMonitor:
             output_path="/downloads/complete/movies/Test.Movie.2024",
             content_id=50,
         )
+        radarr_monitor.sonarr_client.remove_from_queue.assert_not_called()
 
     def test_radarr_identify_stuck_matched_by_movie_id(self, radarr_monitor):
         """Test detection of 'matched to movie by id' pattern"""

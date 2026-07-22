@@ -94,21 +94,48 @@ class TestCompleteWorkflow:
         history = [
             {
                 "eventType": "grabbed",
+                "date": "2026-07-22T02:45:01Z",
                 "downloadId": "test-download-123",
+                "seriesId": 10,
+                "episodeId": 100,
                 "customFormatScore": 100,
                 "customFormats": [{"name": "HDR"}, {"name": "Atmos"}],
                 "data": {"indexer": "PrivateHD"},
             }
         ]
+        imported_history = [
+            {
+                "id": 45648,
+                "eventType": "downloadFolderImported",
+                "date": "2026-07-22T02:49:39Z",
+                "downloadId": "test-download-123",
+                "seriesId": 10,
+                "episodeId": 100,
+            },
+            *history,
+        ]
+        download_history_calls = 0
+
+        def history_response(request, context):
+            nonlocal download_history_calls
+            if "downloadid" in request.qs:
+                download_history_calls += 1
+                records = history if download_history_calls == 1 else imported_history
+                return {"records": records}
+            return {"records": history}
 
         with requests_mock.Mocker() as m:
             # Mock queue API
             m.get(
-                "http://test-sonarr:8989/api/v3/queue", json={"records": [queue_item]}
+                "http://test-sonarr:8989/api/v3/queue",
+                [
+                    {"json": {"records": [queue_item]}},
+                    {"json": {"records": []}},
+                ],
             )
 
             # Mock history API
-            m.get("http://test-sonarr:8989/api/v3/history", json={"records": history})
+            m.get("http://test-sonarr:8989/api/v3/history", json=history_response)
 
             # Mock episode details (no current file)
             m.get("http://test-sonarr:8989/api/v3/episode/100", json={"hasFile": False})
@@ -156,6 +183,16 @@ class TestCompleteWorkflow:
                 "http://test-sonarr:8989/api/v3/command",
                 json={"name": "ManualImport", "id": 123},
                 status_code=201,
+            )
+            m.get("http://test-sonarr:8989/api/v3/command", json=[])
+            m.get(
+                "http://test-sonarr:8989/api/v3/command/123",
+                json={
+                    "id": 123,
+                    "status": "completed",
+                    "result": "successful",
+                    "queued": "2026-07-22T02:49:38Z",
+                },
             )
 
             results = monitor.process_stuck_imports()
@@ -620,7 +657,36 @@ class TestMultiComponentScenarios:
         )
 
         # Mock successful force import
+        monitor.sonarr_client.get_history_for_download.side_effect = [
+            [
+                {
+                    "eventType": "grabbed",
+                    "date": "2026-07-22T02:45:01Z",
+                    "downloadId": "WEBHOOK-TEST-123",
+                    "seriesId": 10,
+                    "episodeId": 100,
+                }
+            ],
+            [
+                {
+                    "id": 45648,
+                    "eventType": "downloadFolderImported",
+                    "date": "2026-07-22T02:49:39Z",
+                    "downloadId": "WEBHOOK-TEST-123",
+                    "seriesId": 10,
+                    "episodeId": 100,
+                }
+            ],
+        ]
+        monitor.sonarr_client.get_active_manual_import_command.return_value = None
         monitor.sonarr_client.force_import = Mock(return_value=(True, 123))
+        monitor.sonarr_client.get_command.return_value = {
+            "id": 123,
+            "status": "completed",
+            "result": "successful",
+            "queued": "2026-07-22T02:49:38Z",
+        }
+        monitor.sonarr_client.get_queue.return_value = []
 
         result = monitor.process_queue_item(queue_item)
 

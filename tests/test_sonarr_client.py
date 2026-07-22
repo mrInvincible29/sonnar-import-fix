@@ -352,6 +352,14 @@ class TestQueue:
             result = client.get_queue()
             assert result == []
 
+    def test_get_queue_error_can_be_kept_distinct_from_empty_queue(self, client):
+        """Safety-sensitive cleanup must not treat API failure as an empty queue."""
+        with requests_mock.Mocker() as m:
+            m.get("http://test-sonarr:8989/api/v3/queue", status_code=500)
+
+            with pytest.raises(RetryError):
+                client.get_queue(raise_on_error=True)
+
     def test_remove_from_queue_success(self, client):
         """Test successful queue item removal"""
         with requests_mock.Mocker() as m:
@@ -614,6 +622,99 @@ class TestImportOperations:
             assert success is True
             assert command_id == 123
 
+            import json
+
+            payload = json.loads(m.request_history[-1].body)
+            assert payload["importMode"] == "auto"
+
+    def test_get_command_returns_command_resource(self, client):
+        command = {
+            "id": 123,
+            "name": "ManualImport",
+            "status": "completed",
+            "result": "successful",
+        }
+        with requests_mock.Mocker() as m:
+            m.get("http://test-sonarr:8989/api/v3/command/123", json=command)
+
+            assert client.get_command(123) == command
+
+    def test_get_command_api_error_is_not_treated_as_missing(self, client):
+        with requests_mock.Mocker() as m:
+            m.get("http://test-sonarr:8989/api/v3/command/123", status_code=500)
+
+            with pytest.raises(SonarrAPIError):
+                client.get_command(123)
+
+    def test_get_command_rejects_unexpected_response_shape(self, client):
+        with requests_mock.Mocker() as m:
+            m.get("http://test-sonarr:8989/api/v3/command/123", json=[])
+
+            with pytest.raises(SonarrAPIError):
+                client.get_command(123)
+
+    def test_get_active_manual_import_command_matches_hash_case_insensitively(
+        self, client
+    ):
+        commands = [
+            {
+                "id": 100,
+                "name": "ManualImport",
+                "status": "completed",
+                "queued": "2026-07-22T02:00:00Z",
+                "body": {"files": [{"downloadId": "ABC123"}]},
+            },
+            {
+                "id": 101,
+                "name": "ManualImport",
+                "status": "queued",
+                "queued": "2026-07-22T02:01:00Z",
+                "body": {"files": [{"downloadId": "abc123"}]},
+            },
+            {
+                "id": 102,
+                "name": "ManualImport",
+                "status": "started",
+                "queued": "2026-07-22T02:02:00Z",
+                "body": {"files": [{"downloadId": "OTHER"}]},
+            },
+        ]
+        with requests_mock.Mocker() as m:
+            m.get("http://test-sonarr:8989/api/v3/command", json=commands)
+
+            result = client.get_active_manual_import_command("AbC123")
+
+            assert result == commands[1]
+
+    def test_get_active_manual_import_command_returns_none_without_active_match(
+        self, client
+    ):
+        commands = [
+            {
+                "id": 100,
+                "name": "ManualImport",
+                "status": "completed",
+                "body": {"files": [{"downloadId": "ABC123"}]},
+            },
+            {
+                "id": 101,
+                "name": "RefreshSeries",
+                "status": "started",
+                "body": {"files": [{"downloadId": "ABC123"}]},
+            },
+        ]
+        with requests_mock.Mocker() as m:
+            m.get("http://test-sonarr:8989/api/v3/command", json=commands)
+
+            assert client.get_active_manual_import_command("ABC123") is None
+
+    def test_get_active_manual_import_command_api_error_is_not_missing(self, client):
+        with requests_mock.Mocker() as m:
+            m.get("http://test-sonarr:8989/api/v3/command", status_code=500)
+
+            with pytest.raises(SonarrAPIError):
+                client.get_active_manual_import_command("ABC123")
+
     def test_force_import_candidate_uses_validated_sonarr_target(self, client):
         """A validated mismatch candidate is submitted without another lookup."""
         candidate = {
@@ -639,6 +740,7 @@ class TestImportOperations:
             ]
             assert payload["files"][0]["seriesId"] == 316
             assert payload["files"][0]["episodeIds"] == [10782]
+            assert payload["importMode"] == "auto"
             assert all(request.method != "GET" for request in m.request_history)
 
     def test_force_import_preserves_all_season_pack_candidates(self, client):
@@ -1115,6 +1217,7 @@ class TestRadarrClient:
             payload = json.loads(post_request.body)
             assert payload["files"][0]["movieId"] == 50
             assert "episodeIds" not in payload["files"][0]
+            assert payload["importMode"] == "auto"
 
     def test_radarr_force_import_candidate_uses_validated_movie(self, radarr_client):
         """Radarr submits only the already validated movie candidate."""
@@ -1136,6 +1239,7 @@ class TestRadarrClient:
                 "/downloads/correct.mkv"
             ]
             assert payload["files"][0]["movieId"] == 50
+            assert payload["importMode"] == "auto"
             assert all(request.method != "GET" for request in m.request_history)
 
     def test_radarr_get_series_by_title_uses_movie(self, radarr_client):

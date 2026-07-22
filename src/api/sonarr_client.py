@@ -287,12 +287,15 @@ class SonarrClient:
         return result
 
     @retry(max_attempts=2, delay=1.0, exceptions=SonarrAPIError)
-    def get_queue(self, include_unknown: bool = True) -> List[Dict]:
+    def get_queue(
+        self, include_unknown: bool = True, raise_on_error: bool = False
+    ) -> List[Dict]:
         """
         Get current download queue.
 
         Args:
             include_unknown: Include unknown series items
+            raise_on_error: Raise API failures instead of treating them as an empty queue
 
         Returns:
             List of queue items
@@ -318,6 +321,10 @@ class SonarrClient:
 
         except Exception as e:
             logger.error(f"Failed to get queue: {e}")
+            if raise_on_error:
+                if isinstance(e, SonarrAPIError):
+                    raise
+                raise SonarrAPIError(f"Failed to get queue: {e}") from e
             return []
 
     def get_queue_cached(self, include_unknown: bool = True) -> List[Dict]:
@@ -517,6 +524,43 @@ class SonarrClient:
 
         return import_items
 
+    def get_command(self, command_id: int) -> Dict:
+        """Get the current state of an Arr command."""
+        response = self._make_request("GET", f"/command/{command_id}")
+        command = response.json()
+        if not isinstance(command, dict):
+            raise SonarrAPIError(f"Invalid command response for command {command_id}")
+        return command
+
+    def get_active_manual_import_command(self, download_id: str) -> Optional[Dict]:
+        """Find the newest active ManualImport command for a download ID."""
+        response = self._make_request("GET", "/command")
+        commands = response.json()
+        if not isinstance(commands, list):
+            raise SonarrAPIError("Invalid command-list response")
+
+        normalized_download_id = str(download_id).casefold()
+        matches = []
+        for command in commands:
+            body = command.get("body") or {}
+            name = command.get("name") or body.get("name") or ""
+            status = str(command.get("status") or "").casefold()
+            if str(name).casefold() != "manualimport":
+                continue
+            if status not in {"queued", "started"}:
+                continue
+
+            files = body.get("files") or []
+            if any(
+                str(item.get("downloadId") or "").casefold() == normalized_download_id
+                for item in files
+            ):
+                matches.append(command)
+
+        if not matches:
+            return None
+        return max(matches, key=lambda item: str(item.get("queued") or ""))
+
     def _prepare_import_item(self, item: Dict, quality: Dict = None):
         """Prepare a single import item with app-type-specific fields."""
         if self.app_type == "radarr":
@@ -547,7 +591,7 @@ class SonarrClient:
         command_payload = {
             "name": "ManualImport",
             "files": import_items,
-            "importMode": "move",
+            "importMode": "auto",
         }
         response = self._make_request("POST", "/command", json=command_payload)
 
