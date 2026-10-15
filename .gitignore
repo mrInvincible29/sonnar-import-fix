@@ -184,3 +184,6 @@ tmp/
 # Test outputs
 test-results/
 test-output/
+
+# Isolated development checkouts
+.worktrees/
