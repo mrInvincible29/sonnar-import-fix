@@ -187,3 +187,6 @@ test-output/
 
 # Isolated development checkouts
 .worktrees/
+
+# Persistent recovery journal
+state/

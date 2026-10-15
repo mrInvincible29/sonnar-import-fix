@@ -242,6 +242,20 @@ python3 main.py --dry-run --once
 python3 main.py --webhook
 ```
 
+## Broken pending download recovery
+
+Sonarr can retain a pending release after an indexer link starts returning an HTML error or HTTP 404/410. Optional recovery checks pending single-episode releases after 30 minutes, searches configured enabled Prowlarr providers for the same release, and sends validated NZBs to SABnzbd or v1/hybrid torrents to qBittorrent. It preserves client tags, indexer client pins and TV categories. Existing torrents are checked by info hash and are never moved, deleted or recategorized.
+
+Enable with `PENDING_RECOVERY_ENABLED=true`. Mount the native Sonarr state directory read-only at `/sonarr-state` (the directory includes SQLite WAL files), and a writable persistent directory owned by UID 1000 at `/app/state`. Paths can be overridden with `PENDING_RECOVERY_DB_PATH` and `PENDING_RECOVERY_STATE_PATH`. Credentials are read from the read-only Sonarr database; do not duplicate download client credentials in environment variables.
+
+`PENDING_RECOVERY_ALLOW_OUTSIDE_TAGS=true` permits an exact-release fallback outside series indexer tags. Release identity retains episode, revision, quality, codec and group, with only separators/case and the known series year normalized. Provider release sizes must agree within 2%. Fallback never crosses NZB/torrent protocols or uses disabled/unconfigured providers. This option defaults to false; recovery itself also defaults to false and never runs for Radarr.
+
+Recovery probes at most 20 search results per pending release and backs off for 30 minutes. Authentication failures, rate limits, server errors and network timeouts defer recovery. Valid pending links are left to Sonarr's normal delay handling. Magnet-only links, pure v2 torrents, obfuscated NZBs whose identity cannot be verified, multi-episode/season packs and stalled swarms require manual attention. This feature handles broken pending HTTP links, not availability of torrent peers or Usenet articles.
+
+A persistent journal records submission intent before upload. After an uncertain response it reconciles SAB queue/history or qBittorrent's info hash and never blindly uploads again. An unresolved ambiguous submission stays held for manual inspection; never delete its journal to retry without checking the download client first. Stale pending entries are removed only after matching Sonarr import history and a new episode file are confirmed. Queue cleanup never removes client data; one RSS sync refreshes Sonarr's pending queue after a cleanup batch.
+
+Recovery events and actionable errors appear in the normal monitor logs. `--dry-run` validates available replacements without uploading, deleting pending records or changing the journal. Preserve the image, configuration and `/app/state` directory together for rollback.
+
 ## Configuration
 
 Edit `config.yaml`:

@@ -14,6 +14,7 @@ from ..api.sonarr_client import SonarrClient
 from ..api.webhook_server import WebhookServer
 from ..config.loader import ConfigLoader
 from .analyzer import ScoreAnalyzer
+from .pending_recovery import PendingRecovery
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,10 @@ class SonarrImportMonitor:
         # Initialize components
         self.sonarr_client = SonarrClient(config, app_type=self.app_type)
         self.analyzer = ScoreAnalyzer(config, self.sonarr_client)
+        self.pending_recovery = None
+        if self.app_type == "sonarr" and config.get("pending_recovery.enabled", False):
+            self.pending_recovery = PendingRecovery(config, self.sonarr_client)
+            logger.info("Pending link recovery enabled for NZBs and torrents")
 
         # Webhook server (initialized on demand)
         self.webhook_server: Optional[WebhookServer] = None
@@ -189,6 +194,8 @@ class SonarrImportMonitor:
         logger.debug("Checking for stuck imports...")
 
         queue = self._get_queue_smart()
+        if self.pending_recovery:
+            self.pending_recovery.run(queue, dry_run=self.dry_run)
         if not queue:
             logger.debug("Queue is empty")
             return {"processed": 0, "forced": 0, "removed": 0}

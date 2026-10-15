@@ -47,6 +47,10 @@ class ConfigLoader:
         "FORCE_IMPORT_THRESHOLD": "decisions.force_import_threshold",
         "REMOVE_PUBLIC_FAILURES": "decisions.remove_public_failures",
         "PROTECT_PRIVATE_RATIO": "decisions.protect_private_ratio",
+        "PENDING_RECOVERY_ENABLED": "pending_recovery.enabled",
+        "PENDING_RECOVERY_DB_PATH": "pending_recovery.db_path",
+        "PENDING_RECOVERY_STATE_PATH": "pending_recovery.state_path",
+        "PENDING_RECOVERY_ALLOW_OUTSIDE_TAGS": "pending_recovery.allow_outside_tags",
         "LOG_LEVEL": "logging.level",
         "LOG_FORMAT": "logging.format",
     }
