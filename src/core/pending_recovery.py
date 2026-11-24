@@ -183,6 +183,7 @@ class PendingRecovery:
         ) != (row["SeriesId"], parsed.get("seasonNumber"), numbers[0]):
             return
         year, title, tags = series.get("year"), row["Title"], series.get("tags", [])
+        self.io.trust(tables["Indexers"])
         if self.io.payload(release["downloadUrl"], protocol, title, year) is not None:
             return
         logger.info(

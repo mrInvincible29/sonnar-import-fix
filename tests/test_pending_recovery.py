@@ -48,7 +48,7 @@ def setup(tmp_path, requests_mock):
                 json.dumps(
                     dict(
                         title=TITLE,
-                        downloadUrl="http://dead/release?apikey=private",
+                        downloadUrl="http://arr/prowlarr/22/dead-release?apikey=private",
                         downloadProtocol=1,
                         size=100,
                         guid="private-guid",
@@ -107,7 +107,7 @@ def setup(tmp_path, requests_mock):
             id=10078, seriesId=116, seasonNumber=4, episodeNumber=6, episodeFileId=9
         ),
     )
-    requests_mock.get("http://dead/release", content=b"Invalid download link.")
+    requests_mock.get("http://arr/prowlarr/22/dead-release", content=b"Invalid download link.")
     requests_mock.get(
         PROWLARR + "/api/v1/search",
         json=[
@@ -116,11 +116,11 @@ def setup(tmp_path, requests_mock):
                 protocol="usenet",
                 indexerId=22,
                 size=100,
-                downloadUrl="http://fresh/file",
+                downloadUrl="http://arr/prowlarr/22/fresh-file",
             )
         ],
     )
-    requests_mock.get("http://fresh/file", content=NZB)
+    requests_mock.get("http://arr/prowlarr/22/fresh-file", content=NZB)
     requests_mock.get(SAB, json=dict(queue=dict(slots=[]), history=dict(slots=[])))
     requests_mock.post(SAB, json=dict(status=True, nzo_ids=["job-1"]))
     requests_mock.get(ARR + "/history", json=dict(records=[]))
@@ -193,7 +193,7 @@ def test_nzb_recovery_survives_restart_and_waits_for_actual_import(setup):
 )
 def test_healthy_or_transient_link_is_not_replaced(setup, response):
     s = setup
-    s.http.get("http://dead/release", **response)
+    s.http.get("http://arr/prowlarr/22/dead-release", **response)
     s.recovery().run(s.queue)
     assert not uploads(s)
     assert not any("/search" in r.url for r in s.http.request_history)
@@ -228,7 +228,7 @@ def test_fallback_must_match_identity_size_protocol_and_configured_provider(
         protocol="usenet",
         indexerId=22,
         size=100,
-        downloadUrl="http://fresh/file",
+        downloadUrl="http://arr/prowlarr/22/fresh-file",
     )
     candidate.update(change)
     s.http.get(PROWLARR + "/api/v1/search", json=[candidate])
@@ -302,7 +302,7 @@ def test_qbittorrent_upload_preserves_category_and_checks_hash(setup):
                 json.dumps(
                     dict(
                         title=TITLE,
-                        downloadUrl="http://dead/file",
+                        downloadUrl="http://arr/prowlarr/22/dead-file",
                         downloadProtocol=2,
                         size=100,
                     )
@@ -324,7 +324,7 @@ def test_qbittorrent_upload_preserves_category_and_checks_hash(setup):
                 ),
             ),
         )
-    s.http.get("http://dead/file", status_code=410)
+    s.http.get("http://arr/prowlarr/22/dead-file", status_code=410)
     s.http.get(
         PROWLARR + "/api/v1/search",
         json=[
@@ -333,11 +333,11 @@ def test_qbittorrent_upload_preserves_category_and_checks_hash(setup):
                 protocol="torrent",
                 indexerId=22,
                 size=100,
-                downloadUrl="http://fresh/file",
+                downloadUrl="http://arr/prowlarr/22/fresh-file",
             )
         ],
     )
-    s.http.get("http://fresh/file", content=body)
+    s.http.get("http://arr/prowlarr/22/fresh-file", content=body)
     s.http.post(QB + "/auth/login", text="Ok.")
     s.http.get(
         QB + "/torrents/info",
@@ -411,7 +411,7 @@ def test_radarr_never_initializes_pending_recovery(setup):
 
 def test_nzb_segment_size_includes_parity_overhead(setup):
     s = setup
-    s.http.get("http://fresh/file", content=NZB.replace(b'bytes="100"', b'bytes="120"'))
+    s.http.get("http://arr/prowlarr/22/fresh-file", content=NZB.replace(b'bytes="100"', b'bytes="120"'))
     s.recovery().run(s.queue)
     assert len(uploads(s)) == 1
 
@@ -422,11 +422,11 @@ def test_unavailable_candidate_does_not_block_next_working_provider(setup):
     s.http.get(
         PROWLARR + "/api/v1/search",
         json=[
-            dict(candidate, downloadUrl="http://temporary/file"),
-            dict(candidate, downloadUrl="http://fresh/file"),
+            dict(candidate, downloadUrl="http://arr/prowlarr/22/temporary-file"),
+            dict(candidate, downloadUrl="http://arr/prowlarr/22/fresh-file"),
         ],
     )
-    s.http.get("http://temporary/file", status_code=429)
+    s.http.get("http://arr/prowlarr/22/temporary-file", status_code=429)
     s.recovery().run(s.queue)
     assert len(uploads(s)) == 1
 
@@ -458,7 +458,7 @@ def torrent_setup(setup):
                 json.dumps(
                     dict(
                         title=TITLE,
-                        downloadUrl="http://dead/file",
+                        downloadUrl="http://arr/prowlarr/22/dead-file",
                         downloadProtocol=2,
                         size=100,
                     )
@@ -480,7 +480,7 @@ def torrent_setup(setup):
                 ),
             ),
         )
-    s.http.get("http://dead/file", status_code=404)
+    s.http.get("http://arr/prowlarr/22/dead-file", status_code=404)
     s.http.get(
         PROWLARR + "/api/v1/search",
         json=[
@@ -489,11 +489,11 @@ def torrent_setup(setup):
                 protocol="torrent",
                 indexerId=22,
                 size=100,
-                downloadUrl="http://fresh/file",
+                downloadUrl="http://arr/prowlarr/22/fresh-file",
             )
         ],
     )
-    s.http.get("http://fresh/file", content=body)
+    s.http.get("http://arr/prowlarr/22/fresh-file", content=body)
     s.http.post(QB + "/auth/login", text="Ok.")
     return s
 

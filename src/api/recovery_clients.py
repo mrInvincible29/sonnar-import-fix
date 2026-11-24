@@ -3,8 +3,9 @@
 import json
 import re
 import sqlite3
+import time
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import requests
 
@@ -15,6 +16,11 @@ from ..core.release_payload import (
     release_identity,
     validate_payload,
 )
+
+# Whole-download budget and redirect cap for release payload fetches.
+PAYLOAD_DEADLINE = 60
+MAX_REDIRECTS = 3
+_REDIRECT_CODES = (301, 302, 303, 307, 308)
 
 
 class DeferredRecovery(RuntimeError):
@@ -41,6 +47,45 @@ class RecoveryIO:
     def __init__(self, client):
         self.arr_url, self.arr_key = client.base_url, client.api_key
         self.host = urlsplit(client.base_url).hostname
+        self.trusted_origins = set()
+
+    @staticmethod
+    def _origin(url):
+        parts = urlsplit(url)
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        return (parts.hostname or "").lower(), port
+
+    def trust(self, indexer_rows):
+        """Only hosts of configured indexers may be fetched for payloads."""
+        origins = set()
+        for row in indexer_rows:
+            base = (row.get("Settings") or {}).get("baseUrl", "")
+            parts = urlsplit(base)
+            if parts.scheme in ("http", "https") and parts.hostname:
+                origins.add(self._origin(self.reachable(base)))
+        self.trusted_origins = origins
+
+    def _open(self, url):
+        """GET a payload URL, following only redirects to trusted origins."""
+        for _ in range(MAX_REDIRECTS + 1):
+            target = self.reachable(url)
+            if self._origin(target) not in self.trusted_origins:
+                raise DeferredRecovery("Download host is not a configured indexer")
+            response = requests.get(
+                target,
+                timeout=(10, 30),
+                stream=True,
+                allow_redirects=False,
+                headers={"Accept-Encoding": "identity"},
+            )
+            if response.status_code not in _REDIRECT_CODES:
+                return response
+            location = response.headers.get("Location")
+            response.close()
+            if not location:
+                raise DeferredRecovery("Download redirect has no target")
+            url = urljoin(target, location)
+        raise DeferredRecovery("Download redirected too many times")
 
     def reachable(self, url):
         parts = urlsplit(url)
@@ -66,15 +111,19 @@ class RecoveryIO:
 
     def payload(self, url, protocol, title, year):
         """None means definitively broken. Auth/rate/network errors defer recovery."""
-        with requests.get(
-            self.reachable(url), timeout=(10, 30), stream=True
-        ) as response:
+        deadline = time.monotonic() + PAYLOAD_DEADLINE
+        with self._open(url) as response:
             if response.status_code in (404, 410):
                 return None
             if response.status_code != 200:
                 raise DeferredRecovery("Download endpoint temporarily unavailable")
+            encoding = response.headers.get("Content-Encoding", "identity")
+            if encoding.strip().lower() not in ("", "identity"):
+                raise DeferredRecovery("Download uses unsupported content encoding")
             body = bytearray()
-            for chunk in response.iter_content(65536):
+            for chunk in response.raw.stream(65536, decode_content=False):
+                if time.monotonic() > deadline:
+                    raise DeferredRecovery("Metadata download exceeded time limit")
                 body.extend(chunk)
                 if len(body) > MAX_PAYLOAD:
                     raise DeferredRecovery("Metadata exceeds recovery size limit")
