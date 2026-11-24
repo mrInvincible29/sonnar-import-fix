@@ -292,7 +292,9 @@ class SonarrImportMonitor:
             return False
 
         try:
-            added = datetime.fromisoformat(str(item.get("added")).replace("Z", "+00:00"))
+            added = datetime.fromisoformat(
+                str(item.get("added")).replace("Z", "+00:00")
+            )
         except ValueError:
             return False
         if added.tzinfo is None:
