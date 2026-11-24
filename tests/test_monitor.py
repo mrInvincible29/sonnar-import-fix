@@ -1552,3 +1552,108 @@ class TestRadarrMonitor:
         radarr_monitor.sonarr_client.get_series_by_title.assert_called_once_with(
             "The Matrix"
         )
+
+
+class TestSupersededStalledDownloads:
+    """Stalled Radarr downloads whose movie already has an equal/better file."""
+
+    @pytest.fixture
+    def radarr_monitor(self):
+        config = MagicMock()
+        config.get.side_effect = lambda key, default=None: {
+            "app.type": "radarr",
+        }.get(key, default)
+
+        with patch("src.core.monitor.SonarrClient"), patch(
+            "src.core.monitor.ScoreAnalyzer"
+        ), patch("src.core.monitor.signal.signal"):
+            monitor = SonarrImportMonitor(config)
+
+        monitor.sonarr_client.remove_from_queue.return_value = True
+        monitor.analyzer._get_current_file_evidence.return_value = (6300, [], None)
+        return monitor
+
+    @staticmethod
+    def _stalled_item(**overrides):
+        item = {
+            "id": 7,
+            "movie": {"id": 1196},
+            "status": "warning",
+            "trackedDownloadStatus": "ok",
+            "trackedDownloadState": "downloading",
+            "errorMessage": "The download is stalled with no connections",
+            "customFormatScore": 5800,
+            "added": "2020-01-01T00:00:00Z",
+        }
+        item.update(overrides)
+        return item
+
+    def test_removes_stalled_item_when_current_file_is_better(self, radarr_monitor):
+        removed = radarr_monitor.remove_superseded_stalled([self._stalled_item()])
+
+        assert removed == 1
+        radarr_monitor.sonarr_client.remove_from_queue.assert_called_once_with(
+            7, remove_from_client=True, blocklist=False
+        )
+
+    def test_keeps_stalled_item_when_it_would_be_an_upgrade(self, radarr_monitor):
+        radarr_monitor.analyzer._get_current_file_evidence.return_value = (100, [], None)
+
+        assert radarr_monitor.remove_superseded_stalled([self._stalled_item()]) == 0
+        radarr_monitor.sonarr_client.remove_from_queue.assert_not_called()
+
+    def test_keeps_stalled_item_when_movie_has_no_file(self, radarr_monitor):
+        radarr_monitor.analyzer._get_current_file_evidence.return_value = (None, [], None)
+
+        assert radarr_monitor.remove_superseded_stalled([self._stalled_item()]) == 0
+        radarr_monitor.sonarr_client.remove_from_queue.assert_not_called()
+
+    def test_keeps_item_when_file_lookup_fails(self, radarr_monitor):
+        radarr_monitor.analyzer._get_current_file_evidence.return_value = (
+            None,
+            [],
+            "boom",
+        )
+
+        assert radarr_monitor.remove_superseded_stalled([self._stalled_item()]) == 0
+        radarr_monitor.sonarr_client.remove_from_queue.assert_not_called()
+
+    def test_ignores_item_that_is_not_stalled(self, radarr_monitor):
+        item = self._stalled_item(errorMessage=None)
+
+        assert radarr_monitor.remove_superseded_stalled([item]) == 0
+        radarr_monitor.sonarr_client.remove_from_queue.assert_not_called()
+
+    def test_ignores_recently_added_stalled_item(self, radarr_monitor):
+        item = self._stalled_item(
+            added=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
+
+        assert radarr_monitor.remove_superseded_stalled([item]) == 0
+        radarr_monitor.sonarr_client.remove_from_queue.assert_not_called()
+
+    def test_ignores_item_without_queue_score(self, radarr_monitor):
+        item = self._stalled_item(customFormatScore=None)
+
+        assert radarr_monitor.remove_superseded_stalled([item]) == 0
+        radarr_monitor.sonarr_client.remove_from_queue.assert_not_called()
+
+    def test_dry_run_does_not_remove(self, radarr_monitor):
+        radarr_monitor.dry_run = True
+
+        assert radarr_monitor.remove_superseded_stalled([self._stalled_item()]) == 1
+        radarr_monitor.sonarr_client.remove_from_queue.assert_not_called()
+
+    def test_sonarr_is_never_touched(self, radarr_monitor):
+        radarr_monitor.app_type = "sonarr"
+
+        assert radarr_monitor.remove_superseded_stalled([self._stalled_item()]) == 0
+        radarr_monitor.sonarr_client.remove_from_queue.assert_not_called()
+
+    def test_process_stuck_imports_runs_the_stalled_cleanup(self, radarr_monitor):
+        radarr_monitor.sonarr_client.get_queue.return_value = [self._stalled_item()]
+
+        results = radarr_monitor.process_stuck_imports()
+
+        radarr_monitor.sonarr_client.remove_from_queue.assert_called_once()
+        assert results["removed"] == 1

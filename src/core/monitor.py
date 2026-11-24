@@ -7,7 +7,7 @@ import signal
 import threading
 import time
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..api.sonarr_client import SonarrClient
@@ -200,16 +200,26 @@ class SonarrImportMonitor:
             logger.debug("Queue is empty")
             return {"processed": 0, "forced": 0, "removed": 0}
 
+        stalled_removed = self.remove_superseded_stalled(queue)
+
         # Identify stuck items
         stuck_items = self._identify_stuck_items(queue)
 
         if not stuck_items:
             logger.debug("No stuck imports found")
-            return {"processed": 0, "forced": 0, "removed": 0}
+            return {
+                "processed": stalled_removed,
+                "forced": 0,
+                "removed": stalled_removed,
+            }
 
         logger.info(f"Found {len(stuck_items)} stuck import(s)")
 
-        results = {"processed": 0, "forced": 0, "removed": 0}
+        results = {
+            "processed": stalled_removed,
+            "forced": 0,
+            "removed": stalled_removed,
+        }
 
         for item in stuck_items:
             try:
@@ -226,6 +236,76 @@ class SonarrImportMonitor:
                 self.stats["errors_encountered"] += 1
 
         return results
+
+    def remove_superseded_stalled(self, queue: List[Dict]) -> int:
+        """
+        Remove stalled Radarr downloads whose movie already has a file that
+        scores at least as high as the stalled release (e.g. a second grab of
+        the same movie finished and was imported first).
+
+        Returns:
+            Number of queue items removed (or that would be, in dry-run).
+        """
+        if self.app_type != "radarr":
+            return 0
+
+        min_age = self.config.get("monitoring.stalled_min_age", None) or 3600
+        removed = 0
+
+        for item in queue:
+            if not self._is_superseded_stalled(item, min_age):
+                continue
+
+            queue_id = item.get("id")
+            title = item.get("title")
+            if self.dry_run:
+                logger.info(
+                    f"🔸 DRY RUN: Would remove superseded stalled download "
+                    f"queueId={queue_id} {title}"
+                )
+                removed += 1
+                continue
+
+            if self.sonarr_client.remove_from_queue(
+                queue_id, remove_from_client=True, blocklist=False
+            ):
+                logger.info(
+                    f"Removed superseded stalled download "
+                    f"queueId={queue_id} downloadId={item.get('downloadId')} {title}"
+                )
+                self.stats["items_removed"] += 1
+                removed += 1
+
+        return removed
+
+    def _is_superseded_stalled(self, item: Dict, min_age_seconds: int) -> bool:
+        """True when a stalled item is old enough and no better than the current file."""
+        if item.get("trackedDownloadState") != "downloading":
+            return False
+        if "stalled" not in str(item.get("errorMessage") or "").lower():
+            return False
+
+        queue_score = item.get("customFormatScore")
+        queue_id = item.get("id")
+        content_id = self._get_content_id(item)
+        if queue_score is None or not queue_id or not content_id:
+            return False
+
+        try:
+            added = datetime.fromisoformat(str(item.get("added")).replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if added.tzinfo is None:
+            added = added.replace(tzinfo=timezone.utc)
+        if (datetime.now(timezone.utc) - added).total_seconds() < min_age_seconds:
+            return False
+
+        current_score, _, error = self.analyzer._get_current_file_evidence(
+            content_id, content_id
+        )
+        if error or current_score is None:
+            return False
+        return current_score >= queue_score
 
     def _identify_stuck_items(self, queue: List[Dict]) -> List[Dict]:
         """Identify items that appear to be stuck."""
