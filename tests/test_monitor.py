@@ -1657,3 +1657,105 @@ class TestSupersededStalledDownloads:
 
         radarr_monitor.sonarr_client.remove_from_queue.assert_called_once()
         assert results["removed"] == 1
+
+
+class TestForceImportSafetyBlock:
+    """Items Sonarr/Radarr blocked as dangerous must never be force-imported."""
+
+    @pytest.fixture
+    def monitor(self):
+        config = MagicMock()
+        config.get.return_value = None
+
+        with patch("src.core.monitor.SonarrClient"), patch(
+            "src.core.monitor.ScoreAnalyzer"
+        ), patch("src.core.monitor.signal.signal"):
+            return SonarrImportMonitor(config)
+
+    @staticmethod
+    def _item(**overrides):
+        item = {
+            "id": 1,
+            "downloadId": "DEF734B87A530577C91B2B8065260DCFE7A07A6A",
+            "series": {"id": 225},
+            "episode": {"id": 10798},
+            "trackedDownloadState": "importBlocked",
+            "quality": {"quality": {"name": "WEBDL-1080p"}},
+            "outputPath": "/torrents/Some.Release.S02E05",
+            "statusMessages": [],
+        }
+        item.update(overrides)
+        return item
+
+    def _assert_blocked(self, monitor, item):
+        assert monitor._execute_force_import(item) is False
+        monitor.sonarr_client.get_history_for_download.assert_not_called()
+        monitor.sonarr_client.force_import.assert_not_called()
+        monitor.sonarr_client.force_import_candidate.assert_not_called()
+        monitor.sonarr_client.remove_from_queue.assert_not_called()
+
+    def test_blocks_executable_warning_message(self, monitor):
+        item = self._item(
+            statusMessages=[
+                {
+                    "title": "Some.Release.S02E05.exe",
+                    "messages": [
+                        "Caution: Found executable file with extension: '.exe'"
+                    ],
+                }
+            ]
+        )
+        self._assert_blocked(monitor, item)
+
+    def test_blocks_potentially_dangerous_file_message(self, monitor):
+        item = self._item(
+            statusMessages=[
+                {
+                    "title": "x",
+                    "messages": [
+                        "Caution: Found potentially dangerous file with extension: '.lnk'"
+                    ],
+                }
+            ]
+        )
+        self._assert_blocked(monitor, item)
+
+    @pytest.mark.parametrize("ext", [".exe", ".SCR", ".bat", ".msi", ".ps1", ".jar"])
+    def test_blocks_dangerous_output_path_extension(self, monitor, ext):
+        item = self._item(outputPath=f"/torrents/Some.Release.S02E05{ext}")
+        self._assert_blocked(monitor, item)
+
+    def test_blocks_dangerous_status_message_title(self, monitor):
+        item = self._item(
+            statusMessages=[{"title": "Some.Release.S02E05.exe", "messages": ["x"]}]
+        )
+        self._assert_blocked(monitor, item)
+
+    def test_blocks_even_in_dry_run(self, monitor):
+        monitor.dry_run = True
+        item = self._item(outputPath="/torrents/Some.Release.S02E05.exe")
+        assert monitor._execute_force_import(item) is False
+
+    def test_normal_item_is_not_blocked_by_the_guard(self, monitor):
+        monitor.sonarr_client.get_history_for_download.return_value = []
+        monitor._execute_force_import(self._item())
+        monitor.sonarr_client.get_history_for_download.assert_called_once()
+
+    def test_process_queue_item_never_forces_blocked_item(self, monitor):
+        monitor.analyzer.analyze_queue_item.return_value = Decision(
+            action="force_import",
+            reasoning="r",
+            grab_score=50,
+            current_score=0,
+            score_difference=50,
+            grab_formats=[],
+            current_formats=[],
+            missing_formats=[],
+            extra_formats=[],
+            is_private_tracker=False,
+            validated_import_candidate=None,
+        )
+        item = self._item(outputPath="/torrents/Some.Release.S02E05.exe")
+
+        assert monitor.process_queue_item(item) == "error"
+        monitor.sonarr_client.force_import.assert_not_called()

@@ -18,6 +18,25 @@ from .pending_recovery import PendingRecovery
 
 logger = logging.getLogger(__name__)
 
+# Files Sonarr/Radarr block as dangerous; never force-import these.
+UNSAFE_EXTENSIONS = (
+    ".exe",
+    ".scr",
+    ".bat",
+    ".cmd",
+    ".com",
+    ".msi",
+    ".lnk",
+    ".ps1",
+    ".vbs",
+    ".vbe",
+    ".wsf",
+    ".jar",
+    ".dll",
+    ".apk",
+)
+UNSAFE_MESSAGE_MARKERS = ("caution:", "executable file", "dangerous file")
+
 FORCE_IMPORT_COMMAND_POLL_SECONDS = 1.0
 FORCE_IMPORT_COMMAND_TIMEOUT_SECONDS = 120.0
 FORCE_IMPORT_HISTORY_POLL_SECONDS = 1.0
@@ -432,10 +451,43 @@ class SonarrImportMonitor:
             content = queue_item.get("series", {})
         return content.get("id") if content else None
 
+    def _unsafe_import_reason(self, queue_item: Dict) -> Optional[str]:
+        """
+        Explain why an item must never be force-imported, or None if it is fine.
+
+        Sonarr/Radarr block executables and other dangerous files on purpose;
+        forcing the import would put them in the media library.
+        """
+        candidates = [queue_item.get("outputPath"), queue_item.get("title")]
+        message_texts = []
+        for msg in queue_item.get("statusMessages") or []:
+            candidates.append(msg.get("title"))
+            message_texts.append(str(msg.get("messages", [])).lower())
+
+        for text in message_texts:
+            if any(marker in text for marker in UNSAFE_MESSAGE_MARKERS):
+                return f"Arr flagged a dangerous file: {text[:160]}"
+
+        for path in candidates:
+            if path and str(path).lower().endswith(UNSAFE_EXTENSIONS):
+                return f"dangerous file extension in {path}"
+        return None
+
     def _execute_force_import(
         self, queue_item: Dict, validated_candidate: Optional[Dict] = None
     ) -> bool:
         """Execute and verify a force import without deleting its torrent."""
+        unsafe_reason = self._unsafe_import_reason(queue_item)
+        if unsafe_reason:
+            logger.warning(
+                "Force import REFUSED (unsafe release): downloadId=%s %s; %s; "
+                "queue and torrent left untouched - review and remove manually",
+                queue_item.get("downloadId"),
+                self._format_target_ids(queue_item),
+                unsafe_reason,
+            )
+            return False
+
         if self.dry_run:
             logger.info("   🔸 DRY RUN: Would force import")
             return True
